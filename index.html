@@ -30,6 +30,26 @@
       <button id="start">开始游戏 · Start</button>
     </div>
   </div>
+  <!-- 游戏选择界面：三个游戏平行进行（点开始后出现，mid-air 风格封面后面再做） -->
+  <div id="menu" style="display:none">
+    <div class="card">
+      <h2>选择游戏</h2>
+      <p class="sub">三个游戏平行进行，选一个开始</p>
+      <div class="menu-grid">
+        <button id="btn1" class="game-btn">
+          <span class="game-emoji">✋</span>
+          <span class="game-name">游戏一 · 照做</span>
+          <span class="game-desc">屏幕出什么手势，你就做什么（单手 → 双手）</span>
+        </button>
+        <button id="btn2" class="game-btn">
+          <span class="game-emoji">↩️</span>
+          <span class="game-name">游戏二 · 反着来</span>
+          <span class="game-desc">做出的手势不能和屏幕相同，也不能重复上一轮</span>
+        </button>
+      </div>
+      <p class="tip">键盘：按 <kbd>1</kbd> 进游戏一 · 按 <kbd>2</kbd> 进游戏二 · 游戏中按 <kbd>M</kbd> 返回本页</p>
+    </div>
+  </div>
   <div id="status">欢迎！点击"开始游戏"进入</div>
 </body>
 </html>

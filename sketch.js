@@ -184,6 +184,10 @@ let lastGesture = "none";          // 上一次"已确认并已发出"的手势
 let gestureHistory = [];           // 最近 5 帧的手势窗口
 let lastGestureEvent = { g: "none", t: 0 }; // 最近一次手势变化事件
 let lastConsumedT = 0;             // 游戏已经处理过的事件时间
+// 游戏一读取的"当前玩家手势"：手部投票确认（hand）或键盘模拟（key）
+let playerGesture = "none";
+let playerGestureSource = "hand";
+let playerGestureT = 0;
 
 function updateGesture() {
   const g = hands.length ? classifyHand(hands[0]) : "none";
@@ -194,9 +198,14 @@ function updateGesture() {
   let best = "none", bestN = 0;
   for (const k in counts) if (counts[k] > bestN) { best = k; bestN = counts[k]; }
   frameGesture = bestN >= 3 ? best : "none";
+  // 手部没有稳定手势时，手部来源的玩家手势清空（移出画面 = 不再匹配）
+  if (frameGesture === "none" && playerGestureSource === "hand") playerGesture = "none";
   if (frameGesture !== "none" && frameGesture !== lastGesture) {
     lastGesture = frameGesture;
     onGestureChanged(frameGesture);
+    playerGesture = frameGesture;
+    playerGestureSource = "hand";
+    playerGestureT = millis();
   }
 }
 
@@ -205,12 +214,15 @@ function onGestureChanged(g) {
 }
 
 // ============ 公共基础 3：游戏外壳 ============
-let gameState = "menu";    // menu / playing / gameover
+let gameState = "menu";    // menu（选择游戏）/ playing / gameover
+let currentGame = 0;       // 0 = 选择界面, 1 = 游戏一·照做, 2 = 游戏二·反着来
 
 function setup() {
   createCanvas(windowWidth, windowHeight);
   pixelDensity(1);
   select("#start").mouseClicked(startExperience);
+  select("#btn1").mouseClicked(startGame1);
+  select("#btn2").mouseClicked(startGame2);
   // 直接双击打开时（file: 协议），浏览器会禁用摄像头，给出明确提示
   if (window.location.protocol === "file:") {
     const warn = select("#filewarn");
@@ -220,10 +232,10 @@ function setup() {
   loadHandLandmarker();
 }
 
-async function startExperience() {
+function startExperience() {
   if (started) {
-    // 从"返回封面"再次开始时，摄像头和模型都在，直接进游戏
-    startGame2();
+    // 摄像头和模型已在跑，直接显示"选择游戏"界面
+    showMenu();
     return;
   }
   setStatus("正在打开摄像头，请在浏览器弹窗中点击“允许”…");
@@ -241,8 +253,19 @@ async function startExperience() {
   select("#intro").hide();
   started = true;
   // 模型在页面打开时已预加载（setup 里调用），就绪后自动开始识别；
-  // 这里直接进游戏，模型加载期间键盘兜底 1/2/3 仍然可玩。
-  startGame2();
+  // 先进"选择游戏"界面，选好游戏再开始。
+  showMenu();
+}
+
+// 显示 / 隐藏"选择游戏"界面
+function showMenu() {
+  gameState = "menu";
+  currentGame = 0;
+  select("#menu").style("display", "flex");
+}
+
+function hideMenu() {
+  select("#menu").style("display", "none");
 }
 
 // ============ 游戏二 "反着来"（反应挑战）============
@@ -266,7 +289,9 @@ function levelTime() {
 }
 
 function startGame2() {
+  currentGame = 2;
   gameState = "playing";
+  hideMenu();
   score = 0;
   combo = 0;
   level = 1;
@@ -371,7 +396,7 @@ function drawGame2() {
   pop();
 }
 
-function drawGameOver() {
+function drawGameOver2() {
   push();
   fill(10, 14, 20, 200);
   rect(0, 0, width, height);
@@ -382,13 +407,221 @@ function drawGameOver() {
   text(gameOverReason, width / 2, height / 2 - 60);
   text("得分 " + score + " · 最高连击 x" + combo, width / 2, height / 2 - 20);
   fill(150, 175, 205); textSize(16);
-  text("按 R 重新开始 · 按 M 返回封面", width / 2, height / 2 + 30);
+  text("按 R 重新开始 · 按 M 返回选择游戏", width / 2, height / 2 + 30);
   pop();
 }
 
-function backToMenu() {
-  gameState = "menu";
-  select("#intro").style("display", "flex");
+// ============ 游戏一 "照做"（模仿挑战）============
+// 规则：屏幕显示目标手势，你做出一模一样的手势（单手：1 个；双手：2 个同时）。
+// 时间先慢后快，每关 6 个手势，做对 5 个过关（给"未识别到"留容错），总分累计。
+const G1_LEVELS = [
+  { hands: 1, time: 5, need: 5, label: "单手" },
+  { hands: 1, time: 4, need: 5, label: "单手" },
+  { hands: 2, time: 5, need: 5, label: "双手" },
+  { hands: 2, time: 4, need: 5, label: "双手" },
+];
+const G1_TOTAL = 6;                  // 每关手势数
+
+let g1Level = 0;                     // 当前关卡 0..3
+let g1Round = 0;                     // 本关第几个目标 0..5
+let g1Target = { left: "rock", right: null };
+let g1Targets = [];                  // 本关目标序列
+let g1Correct = 0;                   // 本关做对数
+let g1Score = 0;                     // 累计总分
+let g1TimeTotal = 5;
+let g1TimeLeft = 5;
+let g1State = "intro";               // intro / doing / result / win / lose
+let g1StateT = 0;
+let g1Msg = "";
+let g1MsgT = 0;
+let g1MatchFrames = 0;               // 双手匹配连续帧数
+let g1CoolT = 0;                     // 结算冷却结束时间
+
+function startGame1() {
+  currentGame = 1;
+  gameState = "playing";
+  hideMenu();
+  g1Score = 0;
+  g1Level = 0;
+  startG1Level();
+}
+
+function startG1Level() {
+  const lv = G1_LEVELS[g1Level];
+  g1Round = 0;
+  g1Correct = 0;
+  g1Targets = [];
+  for (let i = 0; i < G1_TOTAL; i++) {
+    g1Targets.push({
+      left: random(GESTURES),
+      right: lv.hands === 2 ? random(GESTURES) : null,
+    });
+  }
+  g1State = "intro";
+  g1StateT = millis();
+}
+
+function nextG1Target() {
+  if (g1Round >= G1_TOTAL) {
+    const lv = G1_LEVELS[g1Level];
+    if (g1Correct >= lv.need) {
+      g1Score += 20;                 // 过关奖励
+      g1Msg = "过关！ +20 奖励";
+      g1State = "result";
+      g1StateT = millis();
+    } else {
+      g1State = "lose";
+    }
+    return;
+  }
+  g1Target = g1Targets[g1Round];
+  g1TimeTotal = G1_LEVELS[g1Level].time;
+  g1TimeLeft = g1TimeTotal;
+  g1MatchFrames = 0;
+  g1CoolT = millis() + 600;          // 结算后 0.6 秒冷却，防止同一手势连续结算
+  g1State = "doing";
+  g1StateT = millis();
+}
+
+function checkG1Match() {
+  const lv = G1_LEVELS[g1Level];
+  if (lv.hands === 1) {
+    // 单手：玩家当前手势 == 目标（键盘模拟持续有效，直到手部识别确认后自动接管）
+    return playerGesture === g1Target.left;
+  }
+  // 双手：两只手分别匹配两个目标（左右交换也算对），连续 3 帧确认
+  if (hands.length < 2) { g1MatchFrames = 0; return false; }
+  const a = classifyHand(hands[0]);
+  const b = classifyHand(hands[1]);
+  const ok =
+    (a === g1Target.left && b === g1Target.right) ||
+    (a === g1Target.right && b === g1Target.left);
+  if (ok && a !== "none" && b !== "none") g1MatchFrames++;
+  else g1MatchFrames = 0;
+  return g1MatchFrames >= 3;
+}
+
+function updateG1() {
+  const now = millis();
+  if (g1State === "intro") {
+    if (now - g1StateT > 2000) nextG1Target();
+  } else if (g1State === "doing") {
+    g1TimeLeft = g1TimeTotal - (now - g1StateT) / 1000;
+    if (g1TimeLeft <= 0) {
+      g1Msg = "时间到 · 未识别到"; g1MsgT = now;
+      g1Round++;
+      nextG1Target();
+      return;
+    }
+    if (now >= g1CoolT && checkG1Match()) {
+      g1Correct++;
+      g1Score += 10;
+      g1Msg = "正确 +10"; g1MsgT = now;
+      g1Round++;
+      nextG1Target();
+    }
+  } else if (g1State === "result") {
+    if (now - g1StateT > 2200) {
+      if (g1Level >= G1_LEVELS.length - 1) {
+        g1State = "win";
+      } else {
+        g1Level++;
+        startG1Level();
+      }
+    }
+  }
+}
+
+function drawG1Target() {
+  const lv = G1_LEVELS[g1Level];
+  if (lv.hands === 1) {
+    textSize(110);
+    text(GESTURE_EMOJI[g1Target.left], width / 2, height / 2 - 110);
+  } else {
+    textSize(80);
+    text(GESTURE_EMOJI[g1Target.left], width / 2 - 150, height / 2 - 100);
+    text(GESTURE_EMOJI[g1Target.right], width / 2 + 150, height / 2 - 100);
+    fill(150, 175, 205); textSize(16);
+    text("左手", width / 2 - 150, height / 2 - 32);
+    text("右手", width / 2 + 150, height / 2 - 32);
+  }
+}
+
+function drawGame1() {
+  push();
+  const lv = G1_LEVELS[g1Level];
+  textAlign(CENTER, TOP);
+
+  if (g1State === "intro") {
+    fill(255); textSize(34);
+    text("第 " + (g1Level + 1) + " 关 / 共 4 关", width / 2, height / 2 - 120);
+    fill(150, 175, 205); textSize(20);
+    text(lv.label + "模式 · " + G1_TOTAL + " 个手势 · 做对 " + lv.need + " 个过关", width / 2, height / 2 - 70);
+    text("总分 " + g1Score, width / 2, height / 2 - 30);
+    return;
+  }
+
+  // 顶部 HUD
+  textAlign(LEFT, TOP);
+  fill(255); textSize(18);
+  text("总分 " + g1Score, 20, 16);
+  text("第 " + (g1Level + 1) + " 关 · " + (g1Round + 1) + "/" + G1_TOTAL + " 个", 20, 40);
+  text("做对 " + g1Correct + " 个", 20, 64);
+
+  // 倒计时条 + 数字
+  const frac = constrain(g1TimeLeft / g1TimeTotal, 0, 1);
+  noStroke();
+  fill(50, 70, 100);
+  rect(width / 2 - 150, 16, 300, 8);
+  fill(frac > 0.3 ? color(63, 168, 232) : color(220, 80, 80));
+  rect(width / 2 - 150, 16, 300 * frac, 8);
+  fill(255); textSize(28);
+  text(max(ceil(g1TimeLeft), 0), width / 2, 30);
+
+  // 目标手势
+  drawG1Target();
+  fill(255); textSize(24);
+  text(lv.hands === 1 ? "做出相同手势" : "两只手同时做出这两个手势", width / 2, height / 2 + 30);
+
+  // 玩家识别结果
+  fill(150, 175, 205); textSize(18);
+  if (lv.hands === 1) {
+    const shown = playerGesture === "none" ? "未识别" : GESTURE_NAMES[playerGesture];
+    text("识别： " + shown, width / 2, height - 80);
+  } else {
+    const a = hands.length > 0 ? classifyHand(hands[0]) : "none";
+    const b = hands.length > 1 ? classifyHand(hands[1]) : "none";
+    text("识别： 左 " + (a === "none" ? "未识别" : GESTURE_NAMES[a]) + " · 右 " + (b === "none" ? "未识别" : GESTURE_NAMES[b]), width / 2, height - 80);
+  }
+
+  // 反馈
+  if (millis() - g1MsgT < 1300) {
+    fill(140, 255, 160); textSize(22);
+    text(g1Msg, width / 2, height / 2 + 80);
+  }
+  pop();
+}
+
+function drawGameOver1() {
+  push();
+  fill(10, 14, 20, 200);
+  rect(0, 0, width, height);
+  textAlign(CENTER, CENTER);
+  if (g1State === "win") {
+    fill(140, 255, 160); textSize(44);
+    text("通关！全部完成", width / 2, height / 2 - 120);
+    fill(230, 240, 255); textSize(22);
+    text("总分 " + g1Score, width / 2, height / 2 - 60);
+  } else {
+    fill(255, 90, 90); textSize(44);
+    text("本关失败", width / 2, height / 2 - 120);
+    fill(230, 240, 255); textSize(22);
+    text("第 " + (g1Level + 1) + " 关做对 " + g1Correct + "/" + G1_TOTAL + " 个（需要 " + G1_LEVELS[g1Level].need + " 个）", width / 2, height / 2 - 60);
+    text("总分 " + g1Score, width / 2, height / 2 - 20);
+  }
+  fill(150, 175, 205); textSize(16);
+  text("按 R 重新挑战 · 按 M 返回选择游戏", width / 2, height / 2 + 30);
+  pop();
 }
 
 function draw() {
@@ -398,22 +631,52 @@ function draw() {
   if (showCamera) drawCamera();
   if (showSkeleton) drawSkeleton();
   updateGesture();
+  if (gameState === "menu") return;   // 选择界面由 DOM 显示
   if (gameState === "playing") {
-    updateGame2();
-    drawGame2();
+    if (currentGame === 1) {
+      updateG1();
+      drawGame1();
+    } else if (currentGame === 2) {
+      updateGame2();
+      drawGame2();
+    }
   } else if (gameState === "gameover") {
-    drawGameOver();
+    if (currentGame === 1) drawGameOver1();
+    else if (currentGame === 2) drawGameOver2();
   }
 }
 
 function keyPressed() {
   if (key === "k" || key === "K") showSkeleton = !showSkeleton;
   if (key === "c" || key === "C") showCamera = !showCamera;
+  // 选择界面：按 1 / 2 选游戏
+  if (gameState === "menu") {
+    if (key === "1") startGame1();
+    if (key === "2") startGame2();
+    return;
+  }
+  // 游戏中按 M 随时返回选择界面
+  if (gameState === "playing" && (key === "m" || key === "M")) {
+    showMenu();
+    return;
+  }
   // 键盘兜底：1 / 2 / 3 模拟石头 / 剪刀 / 布
-  if (GESTURE_KEYS[key]) onGestureChanged(GESTURE_KEYS[key]);
+  if (GESTURE_KEYS[key]) {
+    onGestureChanged(GESTURE_KEYS[key]);
+    playerGesture = GESTURE_KEYS[key];
+    playerGestureSource = "key";
+    playerGestureT = millis();
+  }
   if (gameState === "gameover") {
-    if (key === "r" || key === "R") startGame2();
-    if (key === "m" || key === "M") backToMenu();
+    if (key === "r" || key === "R") {
+      if (currentGame === 1) {
+        if (g1State === "win") startGame1();
+        else startG1Level();
+      } else if (currentGame === 2) {
+        startGame2();
+      }
+    }
+    if (key === "m" || key === "M") showMenu();
   }
 }
 

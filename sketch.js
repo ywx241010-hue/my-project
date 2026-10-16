@@ -152,6 +152,61 @@ function setStatus(msg) {
 //  封面选择 → 进入对应游戏 → 可以返回封面，游戏之间互不干扰。
 // ---------------------------------------------------------------------
 
+// ============ 公共基础 1：手势分类（石头 / 剪刀 / 布 / 未识别）============
+const GESTURES = ["rock", "scissors", "paper"];
+const GESTURE_NAMES = { rock: "石头", scissors: "剪刀", paper: "布" };
+const GESTURE_EMOJI = { rock: "✊", scissors: "✌️", paper: "🖐" };
+const GESTURE_KEYS = { "1": "rock", "2": "scissors", "3": "paper" };
+
+// 依据 21 个关键点判断手势：
+// 逐手指比较"指尖到指根"和"指根到掌根"的距离，前者更长就认为该手指伸直。
+// 食指、中指放宽（0.6）：剪刀即使没完全伸直也能识别；
+// 无名指、小指收紧（1.1）：只有明显伸直才算，剪刀时微微翘起不会误判。
+// 四指全屈 = 石头；只有食指、中指伸直 = 剪刀；四指全伸 = 布；其他 = 未识别。
+function classifyHand(hand) {
+  if (!hand) return "none";
+  const d = (a, b) => dist(hand[a].x, hand[a].y, hand[b].x, hand[b].y);
+  const index = d(HAND.INDEX_TIP, HAND.INDEX_PIP) > d(HAND.INDEX_PIP, HAND.INDEX_MCP) * 0.6;
+  const middle = d(HAND.MIDDLE_TIP, HAND.MIDDLE_PIP) > d(HAND.MIDDLE_PIP, HAND.MIDDLE_MCP) * 0.6;
+  const ring = d(HAND.RING_TIP, HAND.RING_PIP) > d(HAND.RING_PIP, HAND.RING_MCP) * 1.1;
+  const pinky = d(HAND.PINKY_TIP, HAND.PINKY_PIP) > d(HAND.PINKY_PIP, HAND.PINKY_MCP) * 1.1;
+  if (!index && !middle && !ring && !pinky) return "rock";
+  if (index && middle && !ring && !pinky) return "scissors";
+  if (index && middle && ring && pinky) return "paper";
+  return "none";
+}
+
+// ============ 公共基础 2：5 帧投票 + 变化沿触发 ============
+// 每帧把手势写进最近 5 帧的窗口，窗口内出现最多的手势才算数（至少 3 票）。
+// 这样轻微抖动不会打断确认，换手势后最多 3 帧就能跟上。
+let frameGesture = "none";         // 当前稳定识别出的手势
+let lastGesture = "none";          // 上一次"已确认并已发出"的手势
+let gestureHistory = [];           // 最近 5 帧的手势窗口
+let lastGestureEvent = { g: "none", t: 0 }; // 最近一次手势变化事件
+let lastConsumedT = 0;             // 游戏已经处理过的事件时间
+
+function updateGesture() {
+  const g = hands.length ? classifyHand(hands[0]) : "none";
+  gestureHistory.push(g);
+  if (gestureHistory.length > 5) gestureHistory.shift();
+  const counts = {};
+  for (const x of gestureHistory) if (x !== "none") counts[x] = (counts[x] || 0) + 1;
+  let best = "none", bestN = 0;
+  for (const k in counts) if (counts[k] > bestN) { best = k; bestN = counts[k]; }
+  frameGesture = bestN >= 3 ? best : "none";
+  if (frameGesture !== "none" && frameGesture !== lastGesture) {
+    lastGesture = frameGesture;
+    onGestureChanged(frameGesture);
+  }
+}
+
+function onGestureChanged(g) {
+  if (g !== "none") lastGestureEvent = { g, t: millis() };
+}
+
+// ============ 公共基础 3：游戏外壳 ============
+let gameState = "menu";    // menu / playing / gameover
+
 function setup() {
   createCanvas(windowWidth, windowHeight);
   pixelDensity(1);
@@ -161,10 +216,16 @@ function setup() {
     const warn = select("#filewarn");
     if (warn) warn.style("display", "block");
   }
+  // 页面打开时就预加载手势模型，点"开始"后不用等，立刻进游戏
+  loadHandLandmarker();
 }
 
-function startExperience() {
-  if (started) return;
+async function startExperience() {
+  if (started) {
+    // 从"返回封面"再次开始时，摄像头和模型都在，直接进游戏
+    startGame2();
+    return;
+  }
   setStatus("正在打开摄像头，请在浏览器弹窗中点击“允许”…");
   // 声音初始化失败不影响摄像头（例如无音频设备的环境）
   try { userStartAudio(); } catch (e) {}
@@ -179,31 +240,181 @@ function startExperience() {
   }
   select("#intro").hide();
   started = true;
-  loadHandLandmarker();
+  // 模型在页面打开时已预加载（setup 里调用），就绪后自动开始识别；
+  // 这里直接进游戏，模型加载期间键盘兜底 1/2/3 仍然可玩。
+  startGame2();
+}
+
+// ============ 游戏二 "反着来"（反应挑战）============
+// 规则：屏幕显示一个手势，你的回应必须"与屏幕不同"且"不重复上一轮自己的手势"。
+// 相同 → 炸弹，游戏结束；重复 → 提示不加分，倒计时继续；合法 → 得分 + 连击。
+let roundTarget = "rock";        // 屏幕要求的手势
+let roundReadyT = 0;             // 准备阶段结束时间
+let roundCountStart = 0;         // 倒计时开始时间
+let roundTimeTotal = 3;          // 本轮总时长（秒）
+let roundTimeLeft = 3;
+let lastPlayerGesture = "none";  // 上一轮玩家有效使用的手势
+let score = 0;
+let combo = 0;
+let level = 1;
+let feedback = "";
+let feedbackT = 0;
+let gameOverReason = "";
+
+function levelTime() {
+  return level === 1 ? 4 : level === 2 ? 3 : 2.5;   // L1 4 秒 → L2 3 秒 → L3 2.5 秒
+}
+
+function startGame2() {
+  gameState = "playing";
+  score = 0;
+  combo = 0;
+  level = 1;
+  lastPlayerGesture = "none";
+  startRound2();
+}
+
+function startRound2() {
+  roundTarget = random(GESTURES);
+  roundReadyT = millis() + 1500;   // 1.5 秒准备：先看清目标
+  roundCountStart = roundReadyT;
+  roundTimeTotal = levelTime();
+  roundTimeLeft = roundTimeTotal;
+  feedback = "";
+  feedbackT = 0;
+  lastConsumedT = millis();        // 防止上一轮的残留事件被当成新一轮回应
+}
+
+function respond2(g) {
+  if (g === roundTarget) {
+    gameOver("炸弹！你做出了和屏幕相同的手势");
+    return;
+  }
+  if (g === lastPlayerGesture) {
+    feedback = "不能重复上一轮的手势！本轮不加分";
+    feedbackT = millis();
+    return;
+  }
+  combo++;
+  const gain = 10 + (combo - 1) * 2;
+  score += gain;
+  lastPlayerGesture = g;
+  feedback = "正确 +" + gain + " 分 · 连击 x" + combo;
+  feedbackT = millis();
+  if (score >= 25) level = 3;
+  else if (score >= 10) level = 2;
+  startRound2();
+}
+
+function gameOver(reason) {
+  gameState = "gameover";
+  gameOverReason = reason;
+}
+
+function updateGame2() {
+  const now = millis();
+  // 消费最新的手势事件（只处理本轮开始之后的新事件）
+  const ev = lastGestureEvent;
+  if (ev.t > lastConsumedT && ev.g !== "none") {
+    lastConsumedT = ev.t;
+    respond2(ev.g);
+  }
+  // 倒计时
+  if (now >= roundCountStart) {
+    roundTimeLeft = roundTimeTotal - (now - roundCountStart) / 1000;
+    if (roundTimeLeft <= 0) gameOver("超时！没有做出有效回应");
+  }
+}
+
+function drawGame2() {
+  push();
+  // 左上 HUD
+  textAlign(LEFT, TOP);
+  fill(255); textSize(18);
+  text("得分 " + score, 20, 16);
+  text("连击 x" + combo, 20, 40);
+  text("档位 L" + level, 20, 64);
+  // 顶部倒计时条 + 数字
+  const frac = constrain(roundTimeLeft / roundTimeTotal, 0, 1);
+  noStroke();
+  fill(50, 70, 100);
+  rect(width / 2 - 150, 16, 300, 8);
+  fill(frac > 0.3 ? color(63, 168, 232) : color(220, 80, 80));
+  rect(width / 2 - 150, 16, 300 * frac, 8);
+  textAlign(CENTER, TOP);
+  fill(255); textSize(28);
+  text(max(ceil(roundTimeLeft), 0), width / 2, 30);
+  // 中央目标手势
+  textSize(90);
+  text(GESTURE_EMOJI[roundTarget], width / 2, height / 2 - 120);
+  fill(255); textSize(24);
+  text("做出与「" + GESTURE_NAMES[roundTarget] + "」不同的手势", width / 2, height / 2 - 8);
+  // 准备提示
+  if (millis() < roundReadyT) {
+    fill(255, 200, 80); textSize(26);
+    text("准备好！", width / 2, height / 2 + 40);
+  }
+  // 玩家识别结果
+  fill(150, 175, 205); textSize(18);
+  const shown = frameGesture === "none" ? "未识别" : GESTURE_NAMES[frameGesture];
+  text("识别： " + shown, width / 2, height - 80);
+  // 上一轮记录
+  if (lastPlayerGesture !== "none") {
+    fill(120, 140, 170); textSize(14);
+    text("上一轮你出了：" + GESTURE_NAMES[lastPlayerGesture], width / 2, height - 50);
+  }
+  // 反馈
+  if (millis() - feedbackT < 1500) {
+    fill(255, 200, 80); textSize(20);
+    text(feedback, width / 2, height / 2 + 84);
+  }
+  pop();
+}
+
+function drawGameOver() {
+  push();
+  fill(10, 14, 20, 200);
+  rect(0, 0, width, height);
+  textAlign(CENTER, CENTER);
+  fill(255, 90, 90); textSize(44);
+  text("游戏结束", width / 2, height / 2 - 120);
+  fill(230, 240, 255); textSize(20);
+  text(gameOverReason, width / 2, height / 2 - 60);
+  text("得分 " + score + " · 最高连击 x" + combo, width / 2, height / 2 - 20);
+  fill(150, 175, 205); textSize(16);
+  text("按 R 重新开始 · 按 M 返回封面", width / 2, height / 2 + 30);
+  pop();
+}
+
+function backToMenu() {
+  gameState = "menu";
+  select("#intro").style("display", "flex");
 }
 
 function draw() {
   background(20, 26, 34);
-  if (started) {
-    updateHands();
-    if (showCamera) drawCamera();
-    if (showSkeleton) drawSkeleton();
-    // 临时占位：识别已就绪，游戏逻辑下一步实现
-    push();
-    textAlign(CENTER, TOP);
-    fill(255);
-    textSize(26);
-    text("石头剪刀布 · 手势对决", width / 2, 18);
-    fill(150, 175, 205);
-    textSize(14);
-    text("手势识别已就绪，三个游戏逻辑将由 Qwen 在下一步写入", width / 2, 58);
-    pop();
+  if (!started) return;
+  updateHands();
+  if (showCamera) drawCamera();
+  if (showSkeleton) drawSkeleton();
+  updateGesture();
+  if (gameState === "playing") {
+    updateGame2();
+    drawGame2();
+  } else if (gameState === "gameover") {
+    drawGameOver();
   }
 }
 
 function keyPressed() {
   if (key === "k" || key === "K") showSkeleton = !showSkeleton;
   if (key === "c" || key === "C") showCamera = !showCamera;
+  // 键盘兜底：1 / 2 / 3 模拟石头 / 剪刀 / 布
+  if (GESTURE_KEYS[key]) onGestureChanged(GESTURE_KEYS[key]);
+  if (gameState === "gameover") {
+    if (key === "r" || key === "R") startGame2();
+    if (key === "m" || key === "M") backToMenu();
+  }
 }
 
 function windowResized() {

@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>石头剪刀布 · 手势对决</title>
+  <link rel="stylesheet" href="style.css">
+
+  <!-- p5.js：先用国内镜像 npmmirror，打不开就自动换成 jsDelivr -->
+  <script src="https://registry.npmmirror.com/p5/1.11.10/files/lib/p5.min.js"></script>
+  <script>window.p5 || document.write('<script src="https://cdn.jsdelivr.net/npm/p5@1.11.10/lib/p5.min.js"><\/script>')</script>
+  <script src="sketch.js"></script>
+</head>
+<body>
+  <!-- 最初的版本：简单封面 + 开始按钮（mid-air 风格封面后面再做） -->
+  <div id="intro">
+    <div id="filewarn">⚠ 检测到你是直接双击文件打开的：浏览器会禁用摄像头，请改用 Live Server 打开（VS Code 安装 Live Server 插件后右键 → Open with Live Server）</div>
+    <div class="card">
+      <h1>石头剪刀布 · 手势对决</h1>
+      <p class="sub">用摄像头玩石头剪刀布 · p5.js + MediaPipe 手势识别</p>
+      <ul>
+        <li><b>照做</b>：双手同时模仿屏幕上的手势组合（双手识别）</li>
+        <li><b>反着来</b>：做出的手势不能和屏幕相同，也不能重复上一轮</li>
+        <li><b>天降</b>：手势做任务 + 头部躲炸弹，双线生存</li>
+        <li>技术：手势识别追踪（MediaPipe Hands）+ 表情/人脸识别</li>
+        <li>键盘兜底：<kbd>1</kbd><kbd>2</kbd><kbd>3</kbd> = 石头剪刀布 · <kbd>←</kbd><kbd>→</kbd> = 左右移动</li>
+        <li>隐私：摄像头画面只在本地浏览器内处理，不上传、不保存</li>
+      </ul>
+      <p class="tip">点击开始后，浏览器会询问是否允许使用摄像头，请选择"允许"；退后一点，让摄像头能看到你的手</p>
+      <button id="start">开始游戏 · Start</button>
+    </div>
+  </div>
+  <div id="status">欢迎！点击"开始游戏"进入</div>
+</body>
+</html>

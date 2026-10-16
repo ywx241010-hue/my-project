@@ -1,0 +1,113 @@
+/* 全屏画布，没有滚动条 / full-screen canvas, no scrollbars */
+html, body {
+  margin: 0;
+  padding: 0;
+  overflow: hidden;
+  background: #141a24;
+  color: #e8edf5;
+  font-family: "Avenir Next", "Helvetica Neue", Arial, "PingFang SC", "Microsoft YaHei", sans-serif;
+}
+
+canvas {
+  display: block;
+}
+
+/* ---------- 封面（最初的简单版本；mid-air 三卡片风格后面再做） ---------- */
+#intro {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: #141a24;
+  z-index: 10;
+  padding: 16px;
+  overflow-y: auto;
+}
+
+/* 直接双击打开时的警告条（默认隐藏，JS 检测到 file: 才显示） */
+#filewarn {
+  display: none;
+  max-width: 640px;
+  margin: 0 auto 16px;
+  padding: 10px 16px;
+  border: 1px solid #c05656;
+  border-radius: 8px;
+  background: rgba(120, 40, 40, 0.5);
+  color: #ffd7d7;
+  font-size: 0.9rem;
+  text-align: left;
+  line-height: 1.6;
+}
+
+.card {
+  max-width: 640px;
+  padding: 28px 32px;
+  background: rgba(28, 36, 50, 0.92);
+  border: 2px solid #3fa8e8;
+  border-radius: 12px;
+  text-align: center;
+}
+
+.card h1 {
+  font-size: clamp(2rem, 7vw, 3.4rem);
+  margin: 0;
+  letter-spacing: 0.06em;
+  font-weight: 600;
+}
+
+.sub {
+  margin: 6px 0 18px;
+  opacity: 0.8;
+}
+
+.card ul {
+  list-style: none;
+  padding: 0;
+  margin: 0 0 14px;
+  line-height: 1.8;
+  text-align: left;
+}
+
+.tip {
+  font-size: 0.9em;
+  opacity: 0.75;
+  margin: 0 0 20px;
+}
+
+kbd {
+  border: 1px solid currentColor;
+  border-radius: 4px;
+  padding: 0 6px;
+  font-size: 0.85em;
+}
+
+#start {
+  font-family: inherit;
+  font-size: 1.15rem;
+  padding: 12px 32px;
+  border: none;
+  border-radius: 999px;
+  background: #3fa8e8;
+  color: #141a24;
+  cursor: pointer;
+  font-weight: 600;
+}
+
+#start:hover {
+  filter: brightness(1.15);
+}
+
+/* 状态提示 / status line */
+#status {
+  position: fixed;
+  left: 16px;
+  bottom: 12px;
+  font-size: 0.85rem;
+  padding: 3px 8px;
+  border-radius: 4px;
+  background: rgba(0, 0, 0, 0.55);
+  color: #fff;
+  pointer-events: none;
+  max-width: calc(100vw - 48px);
+}

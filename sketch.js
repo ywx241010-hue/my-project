@@ -61,7 +61,8 @@ let handGestures = [];      // 对应每只手的手势（rock / scissors / pape
 let handSides = [];         // 对应每只手："Left" 左手 / "Right" 右手
 let handScores = [];        // 对应每只手的手势置信度 0..1
 let handRawGestures = [];   // 对应每只手手势的原始类别名（如 Thumb_Up）
-let lastVideoTime = -1;
+let lastVideoTime = -1;      // 手势识别专用的视频帧时间（PART A 使用，不要动）
+let lastFaceVideoTime = -1;  // 人脸追踪专用的视频帧时间（与 lastVideoTime 独立，避免被手势抢占）
 let started = false;
 let showCamera = false;
 let showSkeleton = false;
@@ -201,7 +202,7 @@ function handStatusText(i) {
   const score = handScores[i] || 0;
   const g = handGestures[i];
   if (score < 0.5) return "手势不清楚 · 请做标准";
-  if (g !== "none") return GESTURE_NAMES[g] + " " + Math.round(score * 100) + "%";
+  if (g !== "none") return "识别为" + GESTURE_NAMES[g] + " " + Math.round(score * 100) + "%";
   return (RAW_EMOJI[raw] || "✋") + " " + raw + " · 请做石头/剪刀/布";
 }
 
@@ -338,10 +339,20 @@ function currentGlow() {
     if (a === g1Target.left && b === g1Target.right) return GLOW_GREEN;
     return GLOW_RED;
   }
-  // 游戏二"反着来"：目标是不能和屏幕相同的手势
-  if (playerGesture === "none") return GLOW_ORANGE;
-  if (playerGesture === roundTarget) return GLOW_RED;          // 会触发炸弹
-  return GLOW_GREEN;                                           // 合法回应
+  if (currentGame === 2) {
+    // 游戏二"反着来"：目标是不能和屏幕相同的手势
+    if (playerGesture === "none") return GLOW_ORANGE;
+    if (playerGesture === roundTarget) return GLOW_RED;          // 会触发炸弹
+    return GLOW_GREEN;                                           // 合法回应
+  }
+  if (currentGame === 3) {
+    // 游戏三"危险线挑战"：手势 == 当前目标 → 绿；错误手势 → 红；未检测到手 → 橙
+    if (playerGesture === "none") return GLOW_ORANGE;
+    const cur = typeof g3CurrentTarget === "function" ? g3CurrentTarget() : null;
+    if (cur && playerGesture === cur.type) return GLOW_GREEN;
+    return GLOW_RED;
+  }
+  return null;
 }
 
 // 画屏幕边缘氛围光：中心透明，越靠边缘越亮（像灯光从四周照进来）
@@ -419,13 +430,15 @@ function setup() {
   select("#start").mouseClicked(startExperience);
   select("#btn1").mouseClicked(startGame1);
   select("#btn2").mouseClicked(startGame2);
+  select("#btn3").mouseClicked(startGame3);
   // 直接双击打开时（file: 协议），浏览器会禁用摄像头，给出明确提示
   if (window.location.protocol === "file:") {
     const warn = select("#filewarn");
     if (warn) warn.style("display", "block");
   }
-  // 页面打开时就预加载手势模型，点"开始"后不用等，立刻进游戏
+  // 页面打开时就预加载手势模型和面部模型，点"开始"后不用等，立刻进游戏
   loadGestureRecognizer();
+  loadFaceLandmarker();
 }
 
 function startExperience() {
@@ -479,6 +492,7 @@ let level = 1;
 let feedback = "";
 let feedbackT = 0;
 let gameOverReason = "";
+let g2CountStarted = false;          // 本轮是否已进入倒计时（用于准备结束时接受"保持中的手势"）
 
 function levelTime() {
   return level === 1 ? 4 : level === 2 ? 3 : 2.5;   // L1 4 秒 → L2 3 秒 → L3 2.5 秒
@@ -503,7 +517,8 @@ function startRound2() {
   roundTimeLeft = roundTimeTotal;
   feedback = "";
   feedbackT = 0;
-  lastConsumedT = millis();        // 防止上一轮的残留事件被当成新一轮回应
+  lastConsumedT = roundReadyT;     // 准备结束前的手势事件全部作废：玩家必须在"准备好！"之后重新做动作才算回应
+  g2CountStarted = false;          // 进入倒计时后第一帧接受"保持中的手势"
 }
 
 function respond2(g) {
@@ -534,16 +549,22 @@ function gameOver(reason) {
 
 function updateGame2() {
   const now = millis();
-  // 消费最新的手势事件（只处理本轮开始之后的新事件）
-  const ev = lastGestureEvent;
-  if (ev.t > lastConsumedT && ev.g !== "none") {
-    lastConsumedT = ev.t;
-    respond2(ev.g);
-  }
   // 倒计时
   if (now >= roundCountStart) {
     roundTimeLeft = roundTimeTotal - (now - roundCountStart) / 1000;
     if (roundTimeLeft <= 0) gameOver("超时！没有做出有效回应");
+  }
+  // 进入倒计时的第一帧：如果玩家正保持一个有效手势，把它算作一次回应
+  // （准备期做的手势不提前结算，但准备一结束、手还举着，就算玩家已经开始回应）
+  if (!g2CountStarted && now >= roundCountStart) {
+    g2CountStarted = true;
+    if (playerGesture !== "none") respond2(playerGesture);
+  }
+  // 消费最新的手势事件（只处理本轮"准备结束后"发生的新动作）
+  const ev = lastGestureEvent;
+  if (now >= roundReadyT && ev.t > lastConsumedT && ev.g !== "none") {
+    lastConsumedT = ev.t;
+    respond2(ev.g);
   }
 }
 
@@ -815,13 +836,24 @@ function drawGame1() {
   drawG1Target();
 
   // 底部识别状态条：单手一条居中 / 双手左右各一条（颜色按状态分层）
+  // 匹配成功时短暂显示"匹配成功"，1.3 秒后恢复实时识别状态
+  const justSuccess = millis() - g1MsgT < 1300 && g1Msg.indexOf("正确") === 0;
   if (lv.hands === 1) {
-    drawStatusBar("识别： " + handStatusText(0), handStatusColor(0));
+    if (justSuccess) {
+      drawStatusBar("匹配成功 " + g1Msg, color(140, 255, 160));
+    } else {
+      drawStatusBar("识别： " + handStatusText(0), handStatusColor(0));
+    }
   } else {
-    const idxL = handSides.indexOf("Left");
-    const idxR = handSides.indexOf("Right");
-    drawStatusBar("左： " + handStatusText(idxL), handStatusColor(idxL), width / 2 - 170);
-    drawStatusBar("右： " + handStatusText(idxR), handStatusColor(idxR), width / 2 + 170);
+    if (justSuccess) {
+      drawStatusBar("左：匹配成功", color(140, 255, 160), width / 2 - 170);
+      drawStatusBar("右：匹配成功", color(140, 255, 160), width / 2 + 170);
+    } else {
+      const idxL = handSides.indexOf("Left");
+      const idxR = handSides.indexOf("Right");
+      drawStatusBar("左： " + handStatusText(idxL), handStatusColor(idxL), width / 2 - 170);
+      drawStatusBar("右： " + handStatusText(idxR), handStatusColor(idxR), width / 2 + 170);
+    }
   }
 
   // 成功/提示反馈（短暂显示，不持续闪烁）
@@ -866,6 +898,7 @@ function draw() {
   if (!started) return;
   handsUpdated = false;   // 每帧重置：等 updateHands 拿到新画面才置 true
   updateHands();
+  updateFace();           // 面部追踪（游戏三飞机）：只在新的视频帧检测并限频
   if (showCamera) drawCamera();
   if (showHandTracking) {        // C 键：手势识别线（骨架连线 + 手腕标签，绑定在手上）
     if (showSkeleton) drawSkeleton();
@@ -888,10 +921,14 @@ function draw() {
     } else if (currentGame === 2) {
       updateGame2();
       drawGame2();
+    } else if (currentGame === 3) {
+      updateG3();
+      drawGame3();
     }
   } else if (gameState === "gameover") {
     if (currentGame === 1) drawGameOver1();
     else if (currentGame === 2) drawGameOver2();
+    else if (currentGame === 3) drawGameOver3();
   }
   // 成功粒子画在最上层（短促、自动消散）
   updateBursts();
@@ -907,10 +944,11 @@ function keyPressed() {
   if (key === "v" || key === "V") showCamera = !showCamera;
   // K：骨架连线（在手势识别线打开时有效）
   if (key === "k" || key === "K") showSkeleton = !showSkeleton;
-  // 选择界面：按 1 / 2 选游戏
+  // 选择界面：按 1 / 2 / 3 选游戏
   if (gameState === "menu") {
     if (key === "1") startGame1();
     if (key === "2") startGame2();
+    if (key === "3") startGame3();
     return;
   }
   // 游戏中按 M 随时返回选择界面
@@ -932,6 +970,8 @@ function keyPressed() {
         else startG1Level();
       } else if (currentGame === 2) {
         startGame2();
+      } else if (currentGame === 3) {
+        startGame3();
       }
     }
     if (key === "m" || key === "M") showMenu();
@@ -948,10 +988,483 @@ function mousePressed() {
       else startG1Level();
     } else if (currentGame === 2) {
       startGame2();
+    } else if (currentGame === 3) {
+      startGame3();
     }
   }
 }
 
 function windowResized() {
   resizeCanvas(windowWidth, windowHeight);
+}
+
+// =====================================================================
+//  游戏三 "危险线挑战"（新增，2026-10-18）
+//  规则：手势目标与炸弹从上方掉落；用手势消除"当前最危险（位置最低）"的手势目标；
+//        用鼻尖左右移动飞机躲开炸弹；任意手势目标越过危险线 → 失败；炸弹撞飞机 → 失败。
+//  技术：手势识别复用 PART A（Gesture Recognizer）；飞机由 Face Landmarker 鼻尖控制。
+//  注意：面部模型独立加载（face_landmarker.task），不能复用手部模型；
+//        手势和人脸共用同一个摄像头画面，只在新的视频帧到来时检测并限频。
+// =====================================================================
+const G3_CFG = {
+  countdown: 3,            // 开局倒计时（秒）
+  maxTargets: 2,           // 同一时间最多未消除的手势目标
+  matchConfidence: 0.5,    // 手势消除置信度阈值
+  matchFrames: 3,          // 连续几个新摄像头画面确认
+  spawnInterval: 2.4,      // 基础生成间隔（秒），随难度缩短
+  spawnIntervalMin: 1.0,   // 生成间隔下限
+  levelUpScore: 40,        // 每 40 分提升 1 级难度
+  levelMax: 5,             // 难度上限
+  fallSpeed: 95,           // 基础下落速度（像素/秒）
+  fallSpeedPerLevel: 26,   // 每级增加
+  fallSpeedMax: 250,       // 下落速度上限
+  bombChance: 0.28,        // 生成炸弹的概率
+  planeHalf: 46,           // 飞机碰撞半宽
+  bombRadius: 26,          // 炸弹碰撞半径
+  targetRadius: 46,        // 手势目标卡片半径
+  faceSmooth: 0.12,        // 鼻尖平滑系数（越大响应越快）
+  planeKeySpeed: 620,      // 键盘移动速度（像素/秒，测试兜底）
+  scorePerTarget: 10,      // 消除一个手势目标得分
+  faceDetectEvery: 66,     // 面部检测间隔（毫秒，约 15fps）
+};
+
+let g3State = "intro";       // intro（开局倒计时）/ playing
+let g3StateT = 0;
+let g3Score = 0;
+let g3Cleared = 0;           // 已消除的手势目标数
+let g3Items = [];            // 画面上的掉落物：{type, x, y, vy, born}
+let g3SpawnT = 0;            // 下次生成时间
+let g3PlaneX = 0;            // 飞机当前位置（像素）
+let g3PlaneSmooth = 0;       // 鼻尖目标的平滑位置
+let g3NoseX = null;          // 鼻尖归一化横坐标（0..1，来自面部模型）
+let g3FaceSeen = false;      // 最近一次面部检测是否看到人脸
+let g3MatchFrames = 0;       // 当前目标的连续确认帧
+let g3Msg = "";              // 反馈文字
+let g3MsgT = 0;
+let g3LastWrongHand = "";    // 上次提示过的手势（防止同一错误手势反复刷屏）
+let g3NeedRelease = false;   // 消除后需"重新做一次"（松手或换手势）才能再消除
+let g3LastMatchedGesture = ""; // 上次消除时的手势
+let g3DangerFlash = false;   // 有手势目标接近危险线（警示变色）
+
+// 面部模型（独立于手势模型，游戏三飞机用）
+let faceLandmarker = null;
+let faceOk = false;
+let faceModelStatus = "面部模型加载中…";
+let lastFaceDetectT = 0;
+
+const FACE_MODEL_URLS = [
+  "face_landmarker.task",
+  "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task",
+];
+
+// 加载 Face Landmarker（与手势模型一样优先用项目文件夹里的文件，失败再试 Google）
+async function loadFaceLandmarker() {
+  try {
+    for (const base of MP_URLS) {
+      let vision, fileset;
+      try {
+        vision = await import(`${base}/vision_bundle.mjs`);
+        fileset = await vision.FilesetResolver.forVisionTasks(`${base}/wasm`);
+      } catch (e) { continue; }
+      for (const model of FACE_MODEL_URLS) {
+        for (const delegate of ["GPU", "CPU"]) {
+          try {
+            faceLandmarker = await vision.FaceLandmarker.createFromOptions(fileset, {
+              baseOptions: { modelAssetPath: model, delegate },
+              runningMode: "VIDEO",
+              numFaces: 1,
+              outputFaceBlendshapes: false,
+              outputFacialTransformationMatrixes: false,
+            });
+            faceOk = true;
+            faceModelStatus = "面部模型已加载";
+            return;
+          } catch (e) { /* 试下一个来源 */ }
+        }
+      }
+    }
+    faceModelStatus = "⚠ 缺少 face_landmarker.task：请下载并放入项目文件夹（与 gesture_recognizer.task 同目录）";
+  } catch (e) {
+    faceModelStatus = "⚠ 面部模型加载失败";
+  }
+}
+
+// 面部追踪：只在新的视频帧到来时检测，并限制频率（约 15fps），避免每帧都跑模型。
+// 注意：视频帧时间用独立的 lastFaceVideoTime，不能用手势的 lastVideoTime——
+// draw() 里 updateHands() 先跑会更新 lastVideoTime，共用会让 updateFace() 永远认为没有新帧。
+function updateFace() {
+  if (!faceLandmarker) return;                       // 模型未就绪：由界面显示加载/失败状态
+  if (!video || video.elt.readyState < 2) return;    // 摄像头未就绪
+  if (video.elt.currentTime === lastFaceVideoTime) return;  // 不是新的摄像头画面（人脸专用帧时间）
+  const now = millis();
+  if (now - lastFaceDetectT < G3_CFG.faceDetectEvery) return;  // 频率限制
+  lastFaceDetectT = now;
+  try {
+    const res = faceLandmarker.detectForVideo(video.elt, performance.now());
+    lastFaceVideoTime = video.elt.currentTime;   // 只有真正跑过模型才记录该帧
+    if (res.faceLandmarks && res.faceLandmarks.length > 0) {
+      g3NoseX = res.faceLandmarks[0][1].x;   // 鼻尖是第 1 号关键点（归一化 0..1）
+      g3FaceSeen = true;
+    } else {
+      g3FaceSeen = false;
+    }
+  } catch (e) {
+    lastFaceVideoTime = video.elt.currentTime;
+    g3FaceSeen = false;
+  }
+}
+
+function startGame3() {
+  currentGame = 3;
+  gameState = "playing";
+  hideMenu();
+  g3State = "intro";
+  g3StateT = millis();
+  g3Score = 0;
+  g3Cleared = 0;
+  g3Items = [];
+  g3Msg = ""; g3MsgT = 0;
+  g3MatchFrames = 0;
+  g3LastWrongHand = "";
+  g3PlaneX = width / 2;
+  g3PlaneSmooth = width / 2;
+  g3SpawnT = millis() + G3_CFG.countdown * 1000 + 400;   // 倒计时结束后才开始生成
+}
+
+function g3LevelNow() {
+  return min(G3_CFG.levelMax, 1 + floor(g3Score / G3_CFG.levelUpScore));
+}
+function g3FallSpeed() {
+  return min(G3_CFG.fallSpeedMax, G3_CFG.fallSpeed + (g3LevelNow() - 1) * G3_CFG.fallSpeedPerLevel);
+}
+function g3SpawnInterval() {
+  return max(G3_CFG.spawnIntervalMin, G3_CFG.spawnInterval - (g3LevelNow() - 1) * 0.35);
+}
+function g3DangerY() {
+  return height - 170;
+}
+function g3PlaneY() {
+  return height - 100;
+}
+
+// 当前可消除目标 = 位置最低（最接近危险线）的手势目标。
+// 上方目标即使做出对应手势也不能提前消除——匹配只针对这个目标。
+function g3CurrentTarget() {
+  let best = null;
+  for (const it of g3Items) {
+    if (it.type === "bomb") continue;
+    if (!best || it.y > best.y) best = it;
+  }
+  return best;
+}
+
+// 手势匹配：任意一只手、置信度 ≥ 阈值、连续 N 个新摄像头画面稳定；
+// 消除后需要"重新做一次"手势（松手或换手势），防止保持同一手势连续消除多个目标
+function checkG3Match(cur) {
+  if (g3NeedRelease) { g3MatchFrames = 0; return false; }
+  let idx = -1, best = -1;
+  for (let i = 0; i < handGestures.length; i++) {
+    if ((handScores[i] || 0) > best) { best = handScores[i] || 0; idx = i; }
+  }
+  if (idx < 0) { g3MatchFrames = 0; return false; }
+  if (best < G3_CFG.matchConfidence || handGestures[idx] !== cur.type) {
+    g3MatchFrames = 0;
+    return false;
+  }
+  if (!handsUpdated) return g3MatchFrames >= G3_CFG.matchFrames;   // 没有新画面：维持已确认状态
+  g3MatchFrames++;
+  return g3MatchFrames >= G3_CFG.matchFrames;
+}
+
+function updateG3() {
+  const now = millis();
+  const dt = deltaTime / 1000;
+
+  if (g3State === "intro") {
+    if (now - g3StateT >= G3_CFG.countdown * 1000) g3State = "playing";
+    updateG3Plane(dt);   // 倒计时期间飞机也跟随鼻尖，方便玩家就位
+    return;
+  }
+
+  // 1) 生成掉落物：手势目标最多同时 2 个；炸弹概率生成；横向位置与现存目标错开
+  if (now >= g3SpawnT) {
+    g3SpawnT = now + g3SpawnInterval() * 1000;
+    const targetCount = g3Items.filter((i) => i.type !== "bomb").length;
+    let type;
+    if (targetCount >= G3_CFG.maxTargets) type = "bomb";
+    else if (random() < G3_CFG.bombChance) type = "bomb";
+    else type = random(["rock", "scissors", "paper"]);
+    let x = random(70, width - 70);
+    for (let tries = 0; tries < 12; tries++) {
+      let far = true;
+      for (const it of g3Items) if (abs(it.x - x) < 130) { far = false; break; }
+      if (far) break;
+      x = random(70, width - 70);
+    }
+    g3Items.push({ type, x, y: -60, vy: g3FallSpeed(), born: now });
+  }
+
+  // 2) 掉落物下落
+  for (const it of g3Items) it.y += it.vy * dt;
+
+  // 3) 手势消除：只匹配当前最危险的目标（一次只消一个）
+  // 消除后需要"重新做一次"（松手或换手势），防止保持同一手势连续消除多个目标
+  if (g3NeedRelease) {
+    if (playerGesture === "none" || playerGesture !== g3LastMatchedGesture) g3NeedRelease = false;
+  }
+  const cur = g3CurrentTarget();
+  if (cur) {
+    if (checkG3Match(cur)) {
+      spawnBurst(cur.x, cur.y);
+      g3Score += G3_CFG.scorePerTarget;
+      g3Cleared++;
+      g3Msg = "消除成功 +" + G3_CFG.scorePerTarget;
+      g3MsgT = now;
+      g3MatchFrames = 0;
+      g3LastWrongHand = "";
+      g3NeedRelease = true;
+      g3LastMatchedGesture = cur.type;
+      g3Items = g3Items.filter((i) => i !== cur);
+    } else if (!g3NeedRelease && playerGesture !== "none" && playerGesture !== g3LastWrongHand) {
+      // 识别到错误手势：短暂提示，不判负
+      g3Msg = "手势不匹配 · 目标需要" + GESTURE_NAMES[cur.type];
+      g3MsgT = now;
+      g3LastWrongHand = playerGesture;
+    }
+  } else {
+    g3MatchFrames = 0;
+  }
+
+  // 4) 失败判定：任意手势目标越过危险线
+  const dangerY = g3DangerY();
+  for (const it of g3Items) {
+    if (it.type !== "bomb" && it.y - G3_CFG.targetRadius > dangerY) {
+      gameOverReason = "手势目标越过危险线";
+      gameState = "gameover";
+      return;
+    }
+  }
+
+  // 5) 炸弹：撞到飞机 → 失败；单独越过危险线或离开画面不判负
+  const planeY = g3PlaneY();
+  for (const it of g3Items) {
+    if (it.type !== "bomb") continue;
+    if (abs(it.x - g3PlaneX) < G3_CFG.planeHalf + G3_CFG.bombRadius &&
+        it.y > planeY - 30 && it.y < planeY + 40) {
+      gameOverReason = "飞机被炸弹击中";
+      gameState = "gameover";
+      return;
+    }
+  }
+  const before = g3Items.length;
+  g3Items = g3Items.filter((it) => it.y < height + 120);
+  if (g3Items.length < before) {
+    g3Msg = "躲开炸弹！";
+    g3MsgT = now;
+  }
+
+  // 6) 飞机控制（鼻尖为主，键盘兜底）
+  updateG3Plane(dt);
+
+  // 7) 危险线警示：有手势目标接近时变色
+  g3DangerFlash = false;
+  for (const it of g3Items) {
+    if (it.type !== "bomb" && it.y > dangerY - 90) { g3DangerFlash = true; break; }
+  }
+}
+
+function updateG3Plane(dt) {
+  // 鼻尖控制（主）：镜像映射（脸向左 → 飞机向左）+ 平滑 + 边界限制
+  if (g3FaceSeen && g3NoseX !== null) {
+    const targetX = (1 - g3NoseX) * width;
+    g3PlaneSmooth = lerp(g3PlaneSmooth, targetX, G3_CFG.faceSmooth);
+    g3PlaneX = constrain(g3PlaneSmooth, G3_CFG.planeHalf, width - G3_CFG.planeHalf);
+  }
+  // 人脸丢失：冻结飞机位置（不跳边缘、不判负），提示由 drawGame3 显示
+  // 键盘兜底（摄像头不可用时的测试）：← / A = 左，→ / D = 右
+  if (keyIsDown(LEFT_ARROW) || keyIsDown(65)) {
+    g3PlaneX = constrain(g3PlaneX - G3_CFG.planeKeySpeed * dt, G3_CFG.planeHalf, width - G3_CFG.planeHalf);
+  }
+  if (keyIsDown(RIGHT_ARROW) || keyIsDown(68)) {
+    g3PlaneX = constrain(g3PlaneX + G3_CFG.planeKeySpeed * dt, G3_CFG.planeHalf, width - G3_CFG.planeHalf);
+  }
+}
+
+function drawG3Item(it) {
+  const cur = g3CurrentTarget();
+  const isCur = it.type !== "bomb" && cur === it;
+  push();
+  translate(it.x, it.y);
+  if (it.type === "bomb") {
+    // 炸弹：警示色圆 + 轻微闪烁（不遮目标）
+    const flick = 0.75 + 0.25 * sin(millis() / 90 + it.x);
+    noStroke();
+    fill(255, 60, 60, 110 * flick);
+    circle(0, 0, G3_CFG.bombRadius * 2);
+    stroke(255, 110, 110);
+    strokeWeight(3);
+    noFill();
+    circle(0, 0, G3_CFG.bombRadius * 2);
+    noStroke();
+    textAlign(CENTER, CENTER);
+    textSize(28);
+    text("💣", 0, 0);
+    fill(255, 200, 80);
+    textSize(13);
+    text("炸弹", 0, G3_CFG.bombRadius + 16);
+    pop();
+    return;
+  }
+  // 手势目标：卡片 + 边框；当前目标金色高亮 + "▼ 目标"标记
+  const r = G3_CFG.targetRadius;
+  noStroke();
+  fill(30, 40, 56, 235);
+  rect(-r, -r, r * 2, r * 2, 14);
+  stroke(isCur ? color(255, 200, 80) : color(63, 168, 232));
+  strokeWeight(isCur ? 5 : 3);
+  noFill();
+  rect(-r, -r, r * 2, r * 2, 14);
+  noStroke();
+  textAlign(CENTER, CENTER);
+  fill(255);
+  textSize(44);
+  text(GESTURE_EMOJI[it.type], 0, -6);
+  fill(150, 175, 205);
+  textSize(15);
+  text(GESTURE_NAMES[it.type], 0, r - 12);
+  if (isCur) {
+    fill(255, 200, 80);
+    textSize(14);
+    text("▼ 目标", 0, -r - 14);
+  }
+  pop();
+}
+
+// 飞机：原创几何图形（机身 + 双翼 + 驾驶舱），不依赖外部图片
+function drawG3Plane() {
+  const planeY = g3PlaneY();
+  push();
+  translate(g3PlaneX, planeY);
+  noStroke();
+  fill(140, 200, 255);
+  triangle(-24, 14, 24, 14, 0, -34);
+  fill(90, 150, 220);
+  triangle(-14, 12, -30, 22, -14, 22);
+  triangle(14, 12, 30, 22, 14, 22);
+  fill(255, 200, 80);
+  circle(0, -6, 8);
+  pop();
+}
+
+function drawGame3() {
+  push();
+  const dangerY = g3DangerY();
+
+  // 顶部 HUD：左侧信息面板（分数 / 难度 / 消除数）
+  noStroke();
+  fill(24, 32, 46, 205);
+  rect(14, 12, 215, 92, 14);
+  textAlign(LEFT, TOP);
+  fill(255); textSize(18);
+  text("分数 " + g3Score, 30, 22);
+  fill(255, 200, 80); textSize(16);
+  text("难度 L" + g3LevelNow(), 30, 50);
+  fill(255); textSize(16);
+  text("消除 " + g3Cleared + " 个", 30, 76);
+
+  // 顶部右侧：手势识别状态 + 面部追踪状态
+  // 面部状态区分四种情况：模型未加载 / 摄像头未就绪 / 未检测到人脸 / 检测到人脸（显示鼻尖横坐标）
+  textAlign(RIGHT, TOP);
+  textSize(15);
+  fill(handStatusColor(0));
+  text("手势： " + handStatusText(0), width - 18, 18);
+  let faceTxt, faceCol;
+  if (!faceOk) {
+    faceTxt = faceModelStatus;
+    faceCol = color(255, 150, 150);
+  } else if (!video || video.elt.readyState < 2) {
+    faceTxt = "等待摄像头…";
+    faceCol = color(255, 200, 80);
+  } else if (g3FaceSeen) {
+    faceTxt = "检测到人脸 · 鼻尖x=" + (g3NoseX !== null ? g3NoseX.toFixed(2) : "?");
+    faceCol = color(140, 255, 160);
+  } else {
+    faceTxt = "未检测到人脸 · 请把脸对准摄像头";
+    faceCol = color(255, 200, 80);
+  }
+  fill(faceCol);
+  text(faceTxt, width - 18, 42);
+  // 键盘测试说明
+  fill(120, 140, 170); textSize(12);
+  text("键盘测试：←→/AD 移飞机 · 1/2/3 手势", width - 18, 68);
+
+  // 危险线（接近目标时变红 + 短促警示条）
+  strokeWeight(3);
+  stroke(g3DangerFlash ? color(255, 90, 90) : color(255, 200, 80));
+  line(30, dangerY, width - 30, dangerY);
+  noStroke();
+  fill(g3DangerFlash ? color(255, 90, 90) : color(255, 200, 80));
+  textSize(13);
+  text("危险线", 40, dangerY - 22);
+  if (g3DangerFlash) {
+    fill(255, 90, 90, 36);
+    rect(0, dangerY - 8, width, 16);
+  }
+
+  // 掉落物（手势目标 / 炸弹）
+  for (const it of g3Items) drawG3Item(it);
+
+  // 飞机
+  drawG3Plane();
+
+  // 开局倒计时
+  if (g3State === "intro") {
+    const elapsed = millis() - g3StateT;
+    const left = G3_CFG.countdown - elapsed / 1000;
+    fill(10, 14, 20, 165);
+    rect(0, height / 2 - 95, width, 190);
+    fill(255); textSize(60);
+    text(max(ceil(left), 0), width / 2, height / 2 - 30);
+    fill(200, 220, 250); textSize(20);
+    text("把手放进画面，脸对准摄像头", width / 2, height / 2 + 30);
+    fill(150, 175, 205); textSize(15);
+    text("手势消除目标 · 鼻尖移动飞机躲炸弹", width / 2, height / 2 + 62);
+  }
+
+  // 反馈文字（消除成功 / 手势不匹配 / 躲开炸弹，短暂显示）
+  if (millis() - g3MsgT < 1100 && g3Msg) {
+    const ok = g3Msg.indexOf("消除") === 0 || g3Msg.indexOf("躲开") === 0;
+    fill(ok ? color(140, 255, 160) : color(255, 170, 80));
+    textSize(20);
+    text(g3Msg, width / 2, height / 2 - 60);
+  }
+
+  // 人脸丢失提示（持续显示，不判负）
+  if (faceOk && !g3FaceSeen && g3State === "playing") {
+    fill(255, 200, 80); textSize(15);
+    text("⚠ 未检测到人脸：飞机已冻结 · 请回到摄像头画面", width / 2, height / 2 + 130);
+  }
+  pop();
+}
+
+function drawGameOver3() {
+  push();
+  fill(10, 14, 20, 210);
+  rect(0, 0, width, height);
+  textAlign(CENTER, CENTER);
+  fill(255, 110, 110); textSize(44);
+  text("游戏失败", width / 2, height / 2 - 140);
+  fill(230, 240, 255); textSize(22);
+  text(gameOverReason, width / 2, height / 2 - 80);
+  fill(255); textSize(20);
+  text("分数 " + g3Score + " · 消除 " + g3Cleared + " 个", width / 2, height / 2 - 40);
+  btnRetry = { x: width / 2, y: height / 2 + 20, w: 240, h: 58 };
+  noStroke();
+  fill(63, 168, 232);
+  rect(btnRetry.x - btnRetry.w / 2, btnRetry.y - btnRetry.h / 2, btnRetry.w, btnRetry.h, 29);
+  fill(16, 22, 32); textSize(20);
+  text("重新开始", btnRetry.x, btnRetry.y);
+  fill(150, 175, 205); textSize(15);
+  text("按 R 重玩 · 按 M 返回选择游戏", width / 2, btnRetry.y + btnRetry.h / 2 + 26);
+  pop();
 }

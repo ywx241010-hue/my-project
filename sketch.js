@@ -66,6 +66,7 @@ let started = false;
 let showCamera = false;
 let showSkeleton = false;
 let showHandTracking = false; // C 键：手势识别线（骨架连线 + 手腕上的手势标签）
+let handsUpdated = false;     // 这一帧摄像头是否给出了新的识别结果（防止同一结果重复计票）
 
 async function loadGestureRecognizer() {
   setStatus("正在加载手势识别模型… / Loading the hand model…");
@@ -108,6 +109,7 @@ function updateHands() {
   if (!ok) return;
   if (video.elt.currentTime === lastVideoTime) return;
   lastVideoTime = video.elt.currentTime;
+  handsUpdated = true;   // 只有拿到新识别结果才标记；投票和双手确认都以这个为准
 
   const result = gestureRecognizer.recognizeForVideo(video.elt, performance.now());
   hands = result.landmarks.map((pts) =>
@@ -236,6 +238,129 @@ function drawHandLabels() {
   pop();
 }
 
+// ============ 公共基础 1.6：游戏视觉反馈 ============
+// 成功粒子：短促、从目标下方散开，快速消散，不遮住目标手势
+let burstParticles = [];
+function spawnBurst(x, y) {
+  for (let i = 0; i < 26; i++) {
+    const a = random(TWO_PI);
+    const sp = random(2, 6.5);
+    burstParticles.push({ x, y, vx: cos(a) * sp, vy: sin(a) * sp - 1, life: 1 });
+  }
+}
+function updateBursts() {
+  for (const p of burstParticles) {
+    p.x += p.vx;
+    p.y += p.vy;
+    p.vx *= 0.93;
+    p.vy *= 0.93;
+    p.life -= 0.05;
+  }
+  burstParticles = burstParticles.filter((p) => p.life > 0);
+}
+function drawBursts() {
+  noStroke();
+  for (const p of burstParticles) {
+    fill(140, 255, 160, p.life * 255);
+    circle(p.x, p.y, 10 * p.life + 3);
+  }
+}
+
+// 底部识别状态条：半透明底 + 彩色文字（识别正常 / 未检测到手 / 手势不清楚 / 其他动作）
+// cx 不传时居中；双手阶段传左右手各自的 x，两条分开显示
+function drawStatusBar(txt, col, cx) {
+  if (cx === undefined) cx = width / 2;
+  push();
+  textAlign(CENTER, CENTER);
+  textSize(17);
+  const w = textWidth(txt) + 40;
+  noStroke();
+  fill(10, 16, 26, 170);
+  rect(cx - w / 2, height - 76, w, 40, 20);
+  fill(col);
+  text(txt, cx, height - 56);
+  pop();
+}
+
+// 目标手势底座：深色圆盘 + 高亮圆环 + 手势 emoji 和名字（side 传 "左手"/"右手"/null）
+function drawGestureRing(x, y, r, g, side) {
+  push();
+  textAlign(CENTER, CENTER);
+  noStroke();
+  fill(30, 40, 56, 235);
+  circle(x, y, r * 2);
+  stroke(63, 168, 232);
+  strokeWeight(4);
+  noFill();
+  circle(x, y, r * 2);
+  noStroke();
+  fill(255);
+  textSize(r * 1.0);
+  text(GESTURE_EMOJI[g], x, y - r * 0.06);
+  fill(150, 175, 205);
+  textSize(r * 0.2);
+  text(GESTURE_NAMES[g], x, y + r * 0.6);
+  if (side) {
+    fill(63, 168, 232);
+    rect(x - 50, y - r - 26, 100, 28, 14);
+    fill(16, 22, 32);
+    textSize(15);
+    text(side, x, y - r - 12);
+  }
+  pop();
+}
+
+// 画布内"重新挑战"按钮（游戏结束页可点击；也可按 R）
+let btnRetry = { x: 0, y: 0, w: 240, h: 58 };
+
+// ============ 公共基础 1.8：屏幕边缘氛围光（任务反馈） ============
+// 绿色：做对了 · 橙色：未识别到（没检测到手 / 手势不标准）· 红色：识别到了但做错
+const GLOW_GREEN = { r: 80, g: 255, b: 140, a: 0.6 };
+const GLOW_ORANGE = { r: 255, g: 170, b: 80, a: 0.45 };
+const GLOW_RED = { r: 255, g: 90, b: 90, a: 0.52 };
+
+// 当前应该显示什么颜色的氛围光（null = 不发光）
+function currentGlow() {
+  if (gameState !== "playing") return null;
+  if (currentGame === 1) {
+    const lv = G1_LEVELS[g1Level];
+    if (lv.hands === 1) {
+      if (playerGesture === "none") return GLOW_ORANGE;        // 没检测到手 / 手势不标准
+      if (playerGesture === g1Target.left) return GLOW_GREEN;  // 做对
+      return GLOW_RED;                                         // 识别到了但做错
+    }
+    // 双手：屏幕左侧目标由左手完成、右侧由右手完成
+    const idxL = handSides.indexOf("Left");
+    const idxR = handSides.indexOf("Right");
+    const a = idxL >= 0 ? handGestures[idxL] : "none";
+    const b = idxR >= 0 ? handGestures[idxR] : "none";
+    if (a === "none" || b === "none") return GLOW_ORANGE;     // 有手没检测全
+    if (a === g1Target.left && b === g1Target.right) return GLOW_GREEN;
+    return GLOW_RED;
+  }
+  // 游戏二"反着来"：目标是不能和屏幕相同的手势
+  if (playerGesture === "none") return GLOW_ORANGE;
+  if (playerGesture === roundTarget) return GLOW_RED;          // 会触发炸弹
+  return GLOW_GREEN;                                           // 合法回应
+}
+
+// 画屏幕边缘氛围光：中心透明，越靠边缘越亮（像灯光从四周照进来）
+function drawGlow() {
+  const g = currentGlow();
+  if (!g) return;
+  const ctx = drawingContext;
+  const cx = width / 2, cy = height / 2;
+  const rIn = min(width, height) * 0.4;
+  const rOut = Math.sqrt(cx * cx + cy * cy) + 60;
+  const grad = ctx.createRadialGradient(cx, cy, rIn, cx, cy, rOut);
+  grad.addColorStop(0, "rgba(0,0,0,0)");
+  grad.addColorStop(0.62, "rgba(0,0,0,0)");
+  grad.addColorStop(0.85, "rgba(" + g.r + "," + g.g + "," + g.b + "," + (g.a * 0.45) + ")");
+  grad.addColorStop(1, "rgba(" + g.r + "," + g.g + "," + g.b + "," + g.a + ")");
+  ctx.fillStyle = grad;
+  ctx.fillRect(0, 0, width, height);
+}
+
 // ============ 公共基础 2：5 帧投票 + 变化沿触发 ============
 // 每帧把手势写进最近 5 帧的窗口，窗口内出现最多的手势才算数（至少 3 票）。
 // 这样轻微抖动不会打断确认，换手势后最多 3 帧就能跟上。
@@ -250,6 +375,8 @@ let playerGestureSource = "hand";
 let playerGestureT = 0;
 
 function updateGesture() {
+  // 只在摄像头给出新识别结果时计票：同一帧结果不会在画面更新前反复投票
+  if (!handsUpdated) return;
   // 置信度低于 0.5 的手势不算数，避免把低把握的误判当真（老师的示例用 0.6，这里放宽到 0.5）
   const g = hands.length && (handScores[0] || 0) >= 0.5 ? handGestures[0] : "none";
   gestureHistory.push(g);
@@ -259,9 +386,13 @@ function updateGesture() {
   let best = "none", bestN = 0;
   for (const k in counts) if (counts[k] > bestN) { best = k; bestN = counts[k]; }
   frameGesture = bestN >= 3 ? best : "none";
-  // 手部没有稳定手势时，手部来源的玩家手势清空（移出画面 = 不再匹配）
-  if (frameGesture === "none" && playerGestureSource === "hand") playerGesture = "none";
-  if (frameGesture !== "none" && frameGesture !== lastGesture) {
+  // 没有稳定手势（手离开画面或手势不清楚）：清空手部来源的玩家手势，
+  // 并把 lastGesture 一起重置，这样松手后重新做同一个手势也能再次触发"变化事件"
+  if (frameGesture === "none") {
+    lastGesture = "none";
+    if (playerGestureSource === "hand") playerGesture = "none";
+    if (currentGame === 1) g1NeedRelease = false;   // 松手后允许重新开始匹配
+  } else if (frameGesture !== lastGesture) {
     lastGesture = frameGesture;
     onGestureChanged(frameGesture);
     playerGesture = frameGesture;
@@ -271,7 +402,11 @@ function updateGesture() {
 }
 
 function onGestureChanged(g) {
-  if (g !== "none") lastGestureEvent = { g, t: millis() };
+  if (g !== "none") {
+    lastGestureEvent = { g, t: millis() };
+    // 游戏一：做出新动作（换手势或键盘按下）后，允许重新开始匹配
+    if (currentGame === 1) g1NeedRelease = false;
+  }
 }
 
 // ============ 公共基础 3：游戏外壳 ============
@@ -414,12 +549,17 @@ function updateGame2() {
 
 function drawGame2() {
   push();
-  // 左上 HUD
+  // 顶部 HUD：左侧信息面板（得分 / 连击 / 档位）
+  noStroke();
+  fill(24, 32, 46, 205);
+  rect(14, 12, 215, 92, 14);
   textAlign(LEFT, TOP);
   fill(255); textSize(18);
-  text("得分 " + score, 20, 16);
-  text("连击 x" + combo, 20, 40);
-  text("档位 L" + level, 20, 64);
+  text("得分 " + score, 30, 22);
+  fill(255, 200, 80); textSize(16);
+  text("连击 x" + combo, 30, 50);
+  fill(255); textSize(16);
+  text("档位 L" + level, 30, 76);
   // 顶部倒计时条 + 数字
   const frac = constrain(roundTimeLeft / roundTimeTotal, 0, 1);
   noStroke();
@@ -440,13 +580,12 @@ function drawGame2() {
     fill(255, 200, 80); textSize(26);
     text("准备好！", width / 2, height / 2 + 40);
   }
-  // 玩家识别结果（区分：没检测到手 / 手势不清楚 / 其他动作 / 正常）
-  fill(handStatusColor(0)); textSize(18);
-  text("识别： " + handStatusText(0), width / 2, height - 80);
+  // 玩家识别结果（底部状态条，颜色按状态分层）
+  drawStatusBar("识别： " + handStatusText(0), handStatusColor(0));
   // 上一轮记录
   if (lastPlayerGesture !== "none") {
     fill(120, 140, 170); textSize(14);
-    text("上一轮你出了：" + GESTURE_NAMES[lastPlayerGesture], width / 2, height - 50);
+    text("上一轮你出了：" + GESTURE_NAMES[lastPlayerGesture], width / 2, height - 96);
   }
   // 反馈
   if (millis() - feedbackT < 1500) {
@@ -458,16 +597,23 @@ function drawGame2() {
 
 function drawGameOver2() {
   push();
-  fill(10, 14, 20, 200);
+  fill(10, 14, 20, 210);
   rect(0, 0, width, height);
   textAlign(CENTER, CENTER);
-  fill(255, 90, 90); textSize(44);
-  text("游戏结束", width / 2, height / 2 - 120);
+  fill(255, 110, 110); textSize(44);
+  text("游戏结束", width / 2, height / 2 - 130);
   fill(230, 240, 255); textSize(20);
-  text(gameOverReason, width / 2, height / 2 - 60);
-  text("得分 " + score + " · 最高连击 x" + combo, width / 2, height / 2 - 20);
-  fill(150, 175, 205); textSize(16);
-  text("按 R 重新开始 · 按 M 返回选择游戏", width / 2, height / 2 + 30);
+  text(gameOverReason, width / 2, height / 2 - 70);
+  text("得分 " + score + " · 最高连击 x" + combo, width / 2, height / 2 - 30);
+  // 重新挑战按钮（可点击，也可按 R）
+  btnRetry = { x: width / 2, y: height / 2 + 24, w: 240, h: 58 };
+  noStroke();
+  fill(63, 168, 232);
+  rect(btnRetry.x - btnRetry.w / 2, btnRetry.y - btnRetry.h / 2, btnRetry.w, btnRetry.h, 29);
+  fill(16, 22, 32); textSize(20);
+  text("重新挑战", btnRetry.x, btnRetry.y);
+  fill(150, 175, 205); textSize(15);
+  text("按 R 重玩 · 按 M 返回选择游戏", width / 2, btnRetry.y + btnRetry.h / 2 + 26);
   pop();
 }
 
@@ -496,6 +642,7 @@ let g1Msg = "";
 let g1MsgT = 0;
 let g1MatchFrames = 0;               // 双手匹配连续帧数
 let g1CoolT = 0;                     // 结算冷却结束时间
+let g1NeedRelease = false;           // 结算后需"重新做一次"才能再匹配（防手一直举着自动过关）
 
 function startGame1() {
   currentGame = 1;
@@ -546,17 +693,22 @@ function nextG1Target() {
 function checkG1Match() {
   const lv = G1_LEVELS[g1Level];
   if (lv.hands === 1) {
-    // 单手：玩家当前手势 == 目标（键盘模拟持续有效，直到手部识别确认后自动接管）
-    return playerGesture === g1Target.left;
+    // 单手：结算后必须"重新做一次"（松手或换手势）才能再次匹配，防止手一直举着自动过关
+    return !g1NeedRelease && playerGesture === g1Target.left;
   }
-  // 双手：屏幕左侧目标必须由玩家的左手完成、右侧由右手完成（严格对应），连续 3 帧确认
+  // 双手：屏幕左侧目标必须由玩家的左手完成、右侧由右手完成（严格对应），
+  // 只按摄像头新帧计数（连续 3 个新画面才算确认），且两只手都要有足够把握（置信度 ≥ 0.5）
   const idxL = handSides.indexOf("Left");
   const idxR = handSides.indexOf("Right");
-  if (idxL < 0 || idxR < 0) { g1MatchFrames = 0; return false; }
+  if (idxL < 0 || idxR < 0) { g1MatchFrames = 0; g1NeedRelease = false; return false; }
   const a = handGestures[idxL];
   const b = handGestures[idxR];
-  const ok = a === g1Target.left && b === g1Target.right;
-  if (ok && a !== "none" && b !== "none") g1MatchFrames++;
+  if (a === "none" || b === "none") { g1MatchFrames = 0; g1NeedRelease = false; return false; }
+  if (!handsUpdated) return g1MatchFrames >= 3 && !g1NeedRelease;   // 没有新画面：维持已确认状态
+  const ok = a === g1Target.left && b === g1Target.right &&
+             (handScores[idxL] || 0) >= 0.5 && (handScores[idxR] || 0) >= 0.5 &&
+             !g1NeedRelease;
+  if (ok) g1MatchFrames++;
   else g1MatchFrames = 0;
   return g1MatchFrames >= 3;
 }
@@ -577,6 +729,14 @@ function updateG1() {
       g1Correct++;
       g1Score += 10;
       g1Msg = "正确 +10"; g1MsgT = now;
+      g1NeedRelease = true;   // 结算后必须"重新做一次"才能再匹配（防手一直举着自动连过）
+      // 成功粒子：从目标下方散开（短促，不遮住手势）
+      if (G1_LEVELS[g1Level].hands === 2) {
+        spawnBurst(width / 2 - 170, height / 2 - 30);
+        spawnBurst(width / 2 + 170, height / 2 - 30);
+      } else {
+        spawnBurst(width / 2, height / 2 - 20);
+      }
       g1Round++;
       nextG1Target();
     }
@@ -594,16 +754,19 @@ function updateG1() {
 
 function drawG1Target() {
   const lv = G1_LEVELS[g1Level];
+  const cy = height / 2 - 70;
+  const r = min(110, height * 0.17);
   if (lv.hands === 1) {
-    textSize(110);
-    text(GESTURE_EMOJI[g1Target.left], width / 2, height / 2 - 110);
+    // 单手：屏幕中央一个目标（深色圆盘 + 高亮圆环 + 手势 emoji）
+    drawGestureRing(width / 2, cy, r, g1Target.left, null);
+    fill(255); textSize(22);
+    text("做出相同手势", width / 2, cy + r + 36);
   } else {
-    textSize(80);
-    text(GESTURE_EMOJI[g1Target.left], width / 2 - 150, height / 2 - 100);
-    text(GESTURE_EMOJI[g1Target.right], width / 2 + 150, height / 2 - 100);
-    fill(150, 175, 205); textSize(16);
-    text("左手", width / 2 - 150, height / 2 - 32);
-    text("右手", width / 2 + 150, height / 2 - 32);
+    // 双手：左右并排两个目标，明确标出左手 / 右手
+    drawGestureRing(width / 2 - 170, cy, r, g1Target.left, "左手");
+    drawGestureRing(width / 2 + 170, cy, r, g1Target.right, "右手");
+    fill(255); textSize(22);
+    text("两只手同时做出这两个手势", width / 2, cy + r + 36);
   }
 }
 
@@ -613,83 +776,95 @@ function drawGame1() {
   textAlign(CENTER, TOP);
 
   if (g1State === "intro") {
-    fill(255); textSize(34);
-    text("第 " + (g1Level + 1) + " 关 / 共 4 关", width / 2, height / 2 - 120);
+    // 关卡开始画面：大字标题 + 规则提示
+    fill(255); textSize(42);
+    text("第 " + (g1Level + 1) + " 关", width / 2, height / 2 - 150);
     fill(150, 175, 205); textSize(20);
-    text(lv.label + "模式 · " + G1_TOTAL + " 个手势 · 做对 " + lv.need + " 个过关", width / 2, height / 2 - 70);
-    text("总分 " + g1Score, width / 2, height / 2 - 30);
+    text(lv.label + "模式 · 共 " + G1_TOTAL + " 个手势 · 做对 " + lv.need + " 个过关", width / 2, height / 2 - 96);
+    fill(255, 200, 80); textSize(18);
+    text("屏幕显示手势 → 你做出相同的手势", width / 2, height / 2 - 48);
+    fill(255); textSize(20);
+    text("总分 " + g1Score, width / 2, height / 2 + 4);
     return;
   }
 
-  // 顶部 HUD
+  // 顶部 HUD：左侧信息面板（关卡 / 做对 / 总分）
+  noStroke();
+  fill(24, 32, 46, 205);
+  rect(14, 12, 215, 92, 14);
   textAlign(LEFT, TOP);
   fill(255); textSize(18);
-  text("总分 " + g1Score, 20, 16);
-  text("第 " + (g1Level + 1) + " 关 · " + (g1Round + 1) + "/" + G1_TOTAL + " 个", 20, 40);
-  text("做对 " + g1Correct + " 个", 20, 64);
+  text("第 " + (g1Level + 1) + " 关 · " + lv.label, 30, 22);
+  fill(140, 255, 160); textSize(16);
+  text("做对 " + g1Correct + " / " + G1_TOTAL, 30, 50);
+  fill(255); textSize(16);
+  text("总分 " + g1Score, 30, 76);
 
-  // 倒计时条 + 数字
+  // 中央倒计时条 + 数字
   const frac = constrain(g1TimeLeft / g1TimeTotal, 0, 1);
   noStroke();
   fill(50, 70, 100);
   rect(width / 2 - 150, 16, 300, 8);
   fill(frac > 0.3 ? color(63, 168, 232) : color(220, 80, 80));
   rect(width / 2 - 150, 16, 300 * frac, 8);
+  textAlign(CENTER, TOP);
   fill(255); textSize(28);
   text(max(ceil(g1TimeLeft), 0), width / 2, 30);
 
-  // 目标手势
+  // 目标手势（圆环底座 + 左手/右手徽标）
   drawG1Target();
-  fill(255); textSize(24);
-  text(lv.hands === 1 ? "做出相同手势" : "两只手同时做出这两个手势", width / 2, height / 2 + 30);
 
-  // 玩家识别结果（区分：没检测到手 / 手势不清楚 / 其他动作 / 正常）
-  textSize(18);
+  // 底部识别状态条：单手一条居中 / 双手左右各一条（颜色按状态分层）
   if (lv.hands === 1) {
-    fill(handStatusColor(0));
-    text("识别： " + handStatusText(0), width / 2, height - 80);
+    drawStatusBar("识别： " + handStatusText(0), handStatusColor(0));
   } else {
     const idxL = handSides.indexOf("Left");
     const idxR = handSides.indexOf("Right");
-    fill(handStatusColor(idxL));
-    text("左： " + handStatusText(idxL), width / 2 - 150, height - 80);
-    fill(handStatusColor(idxR));
-    text("右： " + handStatusText(idxR), width / 2 + 150, height - 80);
+    drawStatusBar("左： " + handStatusText(idxL), handStatusColor(idxL), width / 2 - 170);
+    drawStatusBar("右： " + handStatusText(idxR), handStatusColor(idxR), width / 2 + 170);
   }
 
-  // 反馈
+  // 成功/提示反馈（短暂显示，不持续闪烁）
   if (millis() - g1MsgT < 1300) {
     fill(140, 255, 160); textSize(22);
-    text(g1Msg, width / 2, height / 2 + 80);
+    text(g1Msg, width / 2, height / 2 + 104);
   }
   pop();
 }
 
 function drawGameOver1() {
   push();
-  fill(10, 14, 20, 200);
+  fill(10, 14, 20, 210);
   rect(0, 0, width, height);
   textAlign(CENTER, CENTER);
   if (g1State === "win") {
     fill(140, 255, 160); textSize(44);
-    text("通关！全部完成", width / 2, height / 2 - 120);
+    text("通关！全部完成", width / 2, height / 2 - 140);
     fill(230, 240, 255); textSize(22);
-    text("总分 " + g1Score, width / 2, height / 2 - 60);
+    text("总分 " + g1Score, width / 2, height / 2 - 80);
   } else {
-    fill(255, 90, 90); textSize(44);
-    text("本关失败", width / 2, height / 2 - 120);
-    fill(230, 240, 255); textSize(22);
-    text("第 " + (g1Level + 1) + " 关做对 " + g1Correct + "/" + G1_TOTAL + " 个（需要 " + G1_LEVELS[g1Level].need + " 个）", width / 2, height / 2 - 60);
-    text("总分 " + g1Score, width / 2, height / 2 - 20);
+    fill(255, 110, 110); textSize(44);
+    text("本关失败", width / 2, height / 2 - 140);
+    fill(230, 240, 255); textSize(20);
+    text("第 " + (g1Level + 1) + " 关做对 " + g1Correct + "/" + G1_TOTAL + " 个（需要 " + G1_LEVELS[g1Level].need + " 个）", width / 2, height / 2 - 80);
+    text("总分 " + g1Score, width / 2, height / 2 - 46);
   }
-  fill(150, 175, 205); textSize(16);
-  text("按 R 重新挑战 · 按 M 返回选择游戏", width / 2, height / 2 + 30);
+  // 重新挑战按钮（可点击，也可按 R）
+  btnRetry = { x: width / 2, y: height / 2 + 14, w: 240, h: 58 };
+  noStroke();
+  fill(63, 168, 232);
+  rect(btnRetry.x - btnRetry.w / 2, btnRetry.y - btnRetry.h / 2, btnRetry.w, btnRetry.h, 29);
+  fill(16, 22, 32); textSize(20);
+  text("重新挑战", btnRetry.x, btnRetry.y);
+  fill(150, 175, 205); textSize(15);
+  text("按 R 重玩 · 按 M 返回选择游戏", width / 2, btnRetry.y + btnRetry.h / 2 + 26);
   pop();
 }
 
 function draw() {
   background(20, 26, 34);
   if (!started) return;
+  handsUpdated = false;   // 每帧重置：等 updateHands 拿到新画面才置 true
   updateHands();
   if (showCamera) drawCamera();
   if (showHandTracking) {        // C 键：手势识别线（骨架连线 + 手腕标签，绑定在手上）
@@ -718,6 +893,11 @@ function draw() {
     if (currentGame === 1) drawGameOver1();
     else if (currentGame === 2) drawGameOver2();
   }
+  // 成功粒子画在最上层（短促、自动消散）
+  updateBursts();
+  drawBursts();
+  // 屏幕边缘氛围光（绿：做对 · 橙：未识别到 · 红：做错）
+  drawGlow();
 }
 
 function keyPressed() {
@@ -755,6 +935,20 @@ function keyPressed() {
       }
     }
     if (key === "m" || key === "M") showMenu();
+  }
+}
+
+// 游戏结束页：点击画布内"重新挑战"按钮 = 按 R
+function mousePressed() {
+  if (gameState !== "gameover") return;
+  const bx = btnRetry.x, by = btnRetry.y, bw = btnRetry.w, bh = btnRetry.h;
+  if (mouseX > bx - bw / 2 && mouseX < bx + bw / 2 && mouseY > by - bh / 2 && mouseY < by + bh / 2) {
+    if (currentGame === 1) {
+      if (g1State === "win") startGame1();
+      else startG1Level();
+    } else if (currentGame === 2) {
+      startGame2();
+    }
   }
 }
 

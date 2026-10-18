@@ -1,9 +1,13 @@
-/* 全屏画布，没有滚动条 / full-screen canvas, no scrollbars */
+/* ============================================================
+   石头剪刀布 · 手势对决 — 深色游戏界面
+   只用课堂上教过的 CSS（flex、渐变、圆角、阴影等基础写法）
+   ============================================================ */
+
 html, body {
   margin: 0;
   padding: 0;
   overflow: hidden;
-  background: #141a24;
+  background: #101623;
   color: #e8edf5;
   font-family: "Avenir Next", "Helvetica Neue", Arial, "PingFang SC", "Microsoft YaHei", sans-serif;
 }
@@ -12,14 +16,14 @@ canvas {
   display: block;
 }
 
-/* ---------- 封面（最初的简单版本；mid-air 三卡片风格后面再做） ---------- */
+/* ---------- 封面（开始页） ---------- */
 #intro {
   position: fixed;
   inset: 0;
   display: flex;
   align-items: center;
   justify-content: center;
-  background: #141a24;
+  background: linear-gradient(160deg, #101623 0%, #182235 55%, #1d2b42 100%);
   z-index: 10;
   padding: 16px;
   overflow-y: auto;
@@ -42,18 +46,21 @@ canvas {
 
 .card {
   max-width: 640px;
-  padding: 28px 32px;
-  background: rgba(28, 36, 50, 0.92);
+  padding: 32px 36px;
+  background: rgba(24, 32, 46, 0.9);
   border: 2px solid #3fa8e8;
-  border-radius: 12px;
+  border-radius: 16px;
+  box-shadow: 0 0 40px rgba(63, 168, 232, 0.18), 0 12px 32px rgba(0, 0, 0, 0.5);
   text-align: center;
 }
 
 .card h1 {
   font-size: 2.4rem;
-  margin: 0;
-  letter-spacing: 0.06em;
+  margin: 0 0 4px;
+  letter-spacing: 0.08em;
   font-weight: 600;
+  color: #ffffff;
+  text-shadow: 0 0 18px rgba(63, 168, 232, 0.4);
 }
 
 .card h2 {
@@ -64,22 +71,36 @@ canvas {
 }
 
 .sub {
-  margin: 6px 0 18px;
-  opacity: 0.8;
+  margin: 6px 0 20px;
+  opacity: 0.82;
 }
 
 .card ul {
   list-style: none;
   padding: 0;
-  margin: 0 0 14px;
-  line-height: 1.8;
+  margin: 0 0 16px;
+  line-height: 2;
   text-align: left;
+}
+
+.card ul li {
+  padding-left: 26px;
+  position: relative;
+}
+
+.card ul li::before {
+  content: "◆";
+  position: absolute;
+  left: 4px;
+  top: 0;
+  color: #3fa8e8;
+  font-size: 0.7rem;
 }
 
 .tip {
   font-size: 0.9em;
   opacity: 0.75;
-  margin: 0 0 20px;
+  margin: 0 0 22px;
 }
 
 kbd {
@@ -91,14 +112,16 @@ kbd {
 
 #start {
   font-family: inherit;
-  font-size: 1.15rem;
-  padding: 12px 32px;
+  font-size: 1.2rem;
+  padding: 14px 44px;
   border: none;
   border-radius: 999px;
-  background: #3fa8e8;
-  color: #141a24;
+  background: linear-gradient(90deg, #3fa8e8, #2fd4c8);
+  color: #101623;
   cursor: pointer;
-  font-weight: 600;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  box-shadow: 0 6px 20px rgba(63, 168, 232, 0.35);
 }
 
 #start:hover {
@@ -119,14 +142,14 @@ kbd {
   max-width: calc(100vw - 48px);
 }
 
-/* ---------- 游戏选择界面（三个游戏平行进行） ---------- */
+/* ---------- 游戏选择界面 ---------- */
 #menu {
   position: fixed;
   inset: 0;
   display: flex;
   align-items: center;
   justify-content: center;
-  background: #141a24;
+  background: linear-gradient(160deg, #101623 0%, #182235 55%, #1d2b42 100%);
   z-index: 9;
   padding: 16px;
   overflow-y: auto;
@@ -134,10 +157,10 @@ kbd {
 
 .menu-grid {
   display: flex;
-  gap: 18px;
+  gap: 20px;
   flex-wrap: wrap;
   justify-content: center;
-  margin: 6px 0 14px;
+  margin: 10px 0 16px;
 }
 
 .game-btn {
@@ -145,29 +168,32 @@ kbd {
   flex-direction: column;
   align-items: center;
   gap: 6px;
-  width: 230px;
-  padding: 20px 14px;
-  background: rgba(28, 36, 50, 0.92);
+  width: 240px;
+  padding: 24px 16px;
+  background: rgba(24, 32, 46, 0.9);
   border: 2px solid #3fa8e8;
-  border-radius: 12px;
+  border-radius: 14px;
   color: #e8edf5;
   font-family: inherit;
   cursor: pointer;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
 }
 
 .game-btn:hover {
   filter: brightness(1.2);
   border-color: #7cc6f5;
+  transform: translateY(-2px);
 }
 
 .game-emoji {
-  font-size: 2.6rem;
+  font-size: 2.8rem;
   line-height: 1;
 }
 
 .game-name {
   font-size: 1.15rem;
   font-weight: 600;
+  color: #ffffff;
 }
 
 .game-desc {

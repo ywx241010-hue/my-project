@@ -240,30 +240,47 @@ function drawHandLabels() {
 }
 
 // ============ 公共基础 1.6：游戏视觉反馈 ============
-// 成功粒子：短促、从目标下方散开，快速消散，不遮住目标手势
+// 成功粒子：短促、像"炸开的水滴"一样四散（带拖尾、受重力下落、高光），快速消散
 let burstParticles = [];
-function spawnBurst(x, y) {
+const WATER_COL = { r: 130, g: 220, b: 255 };   // 水花蓝
+const FIRE_COL = { r: 255, g: 150, b: 70 };       // 爆炸橙
+function spawnBurst(x, y, col) {
+  const c = col || { r: 140, g: 255, b: 160 };    // 默认绿色（游戏一/二沿用）
   for (let i = 0; i < 26; i++) {
     const a = random(TWO_PI);
-    const sp = random(2, 6.5);
-    burstParticles.push({ x, y, vx: cos(a) * sp, vy: sin(a) * sp - 1, life: 1 });
+    const sp = random(2, 7);
+    burstParticles.push({
+      x, y, px: x, py: y,                        // 上一帧位置（用于拖尾）
+      vx: cos(a) * sp, vy: sin(a) * sp - 1.5,     // 从中心喷出，略微向上
+      life: 1, size: random(2.5, 6), grav: random(0.06, 0.12), col: c,
+    });
   }
 }
 function updateBursts() {
   for (const p of burstParticles) {
+    p.px = p.x; p.py = p.y;
     p.x += p.vx;
     p.y += p.vy;
-    p.vx *= 0.93;
-    p.vy *= 0.93;
-    p.life -= 0.05;
+    p.vx *= 0.94;
+    p.vy *= 0.94;
+    p.vy += p.grav;          // 水滴受重力，飞散后向下坠，更像水花
+    p.life -= 0.045;
   }
   burstParticles = burstParticles.filter((p) => p.life > 0);
 }
 function drawBursts() {
   noStroke();
   for (const p of burstParticles) {
-    fill(140, 255, 160, p.life * 255);
-    circle(p.x, p.y, 10 * p.life + 3);
+    // 拖尾：从上一位置到当前位置的渐变短线（水滴喷射的轨迹）
+    stroke(p.col.r, p.col.g, p.col.b, p.life * 120);
+    strokeWeight(max(p.size * p.life * 0.5, 1));
+    line(p.px, p.py, p.x, p.y);
+    noStroke();
+    // 主水滴：亮色圆 + 白色高光
+    fill(p.col.r, p.col.g, p.col.b, p.life * 230);
+    circle(p.x, p.y, p.size * p.life * 2);
+    fill(255, 255, 255, p.life * 170);
+    circle(p.x - p.size * 0.18, p.y - p.size * 0.18, p.size * p.life * 0.8);
   }
 }
 
@@ -1241,6 +1258,7 @@ const G3_CFG = {
 let g3State = "intro";       // intro（开局倒计时）/ playing / wavebreak（波间过渡）
 let g3StateT = 0;
 let g3WaveT = 0;             // 波间过渡开始时刻（过渡持续 waveBreakMs 后进入下一波）
+let g3Boom = null;           // 炸弹击中飞机时的爆炸 {x, y, t}：炸弹变大炸开动画
 let g3Score = 0;
 let g3Cleared = 0;           // 本局已消除的手势目标总数（决定波次：每 5 个推进一波）
 let g3Items = [];            // 画面上的掉落物：{type, x, y, vy, born}
@@ -1348,6 +1366,7 @@ function startGame3() {
   gameState = "playing";
   hideMenu();
   lastNewRecord = 0;         // 新一局开始，清掉上一局的新纪录标记
+  g3Boom = null;             // 清掉上一局的炸弹爆炸动画
   g3State = "intro";
   g3StateT = millis();
   g3Score = 0;
@@ -1486,7 +1505,7 @@ function updateG3() {
   const cur = g3CurrentTarget();
   if (cur) {
     if (checkG3Match(cur)) {
-      spawnBurst(cur.x, cur.y);
+      spawnBurst(cur.x, cur.y, WATER_COL);   // 水花蓝粒子：目标像水滴一样炸开消散
       g3Score += G3_CFG.scorePerTarget;
       g3Cleared++;
       g3Msg = "消除成功 +" + G3_CFG.scorePerTarget;
@@ -1543,6 +1562,10 @@ function updateG3() {
     if (abs(it.x - g3PlaneX) < G3_CFG.planeHalf + G3_CFG.bombRadius &&
         it.y > planeY - 30 && it.y < planeY + 40) {
       gameOverReason = "飞机被炸弹击中";
+      // 炸弹爆炸：记录爆炸位置，失败页先播放"炸弹变大炸开"动画；橙红粒子四散
+      g3Boom = { x: it.x, y: it.y, t: now };
+      for (let i = 0; i < 26; i++) spawnBurst(it.x, it.y, FIRE_COL);
+      for (let i = 0; i < 14; i++) spawnBurst(it.x, it.y, { r: 255, g: 230, b: 130 });
       gameState = "gameover";
       recordBest(3, g3Score);
       sfxBomb();
@@ -1813,6 +1836,36 @@ function drawGameOver3() {
   push();
   fill(10, 14, 20, 210);
   rect(0, 0, width, height);
+
+  // 炸弹爆炸动画：被击中后 0.7 秒内，炸弹本体变大、闪光圆环扩散、橙红粒子四散
+  if (g3Boom && millis() - g3Boom.t < 700) {
+    const et = (millis() - g3Boom.t) / 700;          // 0..1
+    const r = G3_CFG.bombRadius * (1 + 1.8 * et);    // 炸弹不断变大
+    // 扩散的闪光圆环
+    noFill();
+    for (let i = 1; i <= 3; i++) {
+      const rr = r * (0.6 + 0.55 * et * i / 2);
+      stroke(255, 180, 80, (1 - et) * 170);
+      strokeWeight(3 + 4 * (1 - et));
+      circle(g3Boom.x, g3Boom.y, rr * 2);
+    }
+    // 炸弹本体：警示色圆 + 边框 + 炸弹 emoji，一起放大
+    push();
+    translate(g3Boom.x, g3Boom.y);
+    noStroke();
+    fill(255, 90, 60, 150 * (1 - et * 0.4));
+    circle(0, 0, r * 2);
+    stroke(255, 160, 110);
+    strokeWeight(4);
+    noFill();
+    circle(0, 0, r * 2);
+    noStroke();
+    textAlign(CENTER, CENTER);
+    textSize(r);
+    text("💣", 0, 0);
+    pop();
+  }
+
   textAlign(CENTER, CENTER);
   if (g3Win) {
     // 胜利：挑战完成（绿色标题，区别于失败的红色）

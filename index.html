@@ -3,6 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="石头剪刀布 · 手势对决：用摄像头手势识别玩石头剪刀布，p5.js + MediaPipe。">
   <title>石头剪刀布 · 手势对决</title>
   <link rel="stylesheet" href="style.css">
 
@@ -12,23 +13,46 @@
   <script src="sketch.js"></script>
 </head>
 <body>
-  <!-- 开始页：简洁说明玩法 + 明显的开始按钮 -->
+  <!-- 封面（大厅）：品牌 + 三个玩法卡片 + 最佳纪录 + 进入按钮 -->
   <div id="intro">
     <div id="filewarn">⚠ 检测到你是直接双击文件打开的：浏览器会禁用摄像头，请改用 Live Server 打开（VS Code 安装 Live Server 插件后右键 → Open with Live Server）</div>
-    <div class="card">
-      <h1>石头剪刀布 · 手势对决</h1>
-      <p class="sub">用摄像头玩石头剪刀布 · p5.js + MediaPipe 手势识别</p>
-      <ul>
-        <li><b>照做</b>：屏幕出什么手势，你就做什么（单手 → 双手）</li>
-        <li><b>反着来</b>：做出的手势不能和屏幕相同，也不能重复上一轮</li>
-        <li><b>天降</b>：手势做任务 + 头部躲炸弹（开发中）</li>
-        <li>隐私：摄像头画面只在本地浏览器内处理，不上传、不保存</li>
-      </ul>
+    <div class="card hero">
+      <div class="brand">
+        <h1>石头剪刀布 · 手势对决</h1>
+        <p class="sub">用摄像头玩石头剪刀布 · p5.js + MediaPipe 手势识别</p>
+      </div>
+      <div class="hero-modes">
+        <div class="mode-card">
+          <span class="game-emoji">✋</span>
+          <b>照做</b>
+          <span>屏幕出什么手势，你就做什么（单手 → 双手）</span>
+        </div>
+        <div class="mode-card">
+          <span class="game-emoji">↩️</span>
+          <b>反着来</b>
+          <span>做出的手势不能和屏幕相同，也不能重复上一轮</span>
+        </div>
+        <div class="mode-card">
+          <span class="game-emoji">🎯</span>
+          <b>危险线挑战</b>
+          <span>手势消除掉落目标，鼻尖控制飞机躲炸弹</span>
+        </div>
+      </div>
+      <div class="best-stats">
+        <div><b id="best1">0</b><small>照做 · 最高分</small></div>
+        <div><b id="best2">0</b><small>反着来 · 最高分</small></div>
+        <div><b id="best3">0</b><small>危险线 · 最高分</small></div>
+      </div>
       <p class="tip">键盘兜底：<kbd>1</kbd><kbd>2</kbd><kbd>3</kbd> = 石头剪刀布 · <kbd>C</kbd> 手势识别线 · <kbd>V</kbd> 摄像头 · <kbd>K</kbd> 骨架<br>
-      点击开始后请允许摄像头；退后一点，让摄像头能看到你的手</p>
-      <button id="start">开始游戏 · Start</button>
+      点击开始后请允许摄像头；退后一点，让摄像头能看到你的手 · 摄像头画面只在本地处理，不上传</p>
+      <div class="launch">
+        <button id="guideOpen" class="ghost-btn">玩法指南</button>
+        <button id="settingsOpen" class="ghost-btn">设置</button>
+        <button id="start" class="primary-btn">开始游戏 · Start</button>
+      </div>
     </div>
   </div>
+
   <!-- 游戏选择界面：已实现的玩法都可以选 -->
   <div id="menu" style="display:none">
     <div class="card">
@@ -51,9 +75,66 @@
           <span class="game-desc">手势消除掉落目标，鼻尖控制飞机躲炸弹</span>
         </button>
       </div>
+      <p id="menuBest" class="best-line">最佳纪录：照做 <b>0</b> · 反着来 <b>0</b> · 危险线 <b>0</b></p>
+      <div class="launch small">
+        <button id="guideOpen2" class="ghost-btn">玩法指南</button>
+        <button id="settingsOpen2" class="ghost-btn">设置</button>
+      </div>
       <p class="tip">键盘：按 <kbd>1</kbd> 进游戏一 · 按 <kbd>2</kbd> 进游戏二 · 按 <kbd>3</kbd> 进游戏三 · 游戏中按 <kbd>M</kbd> 返回 · <kbd>C</kbd> 手势识别线 · <kbd>V</kbd> 摄像头 · <kbd>K</kbd> 骨架</p>
     </div>
   </div>
+
+  <!-- 玩法指南弹窗 -->
+  <div id="instructions" class="modal" style="display:none">
+    <div class="modal-box">
+      <button id="guideClose" class="close-btn">×</button>
+      <h2>玩法指南</h2>
+      <p class="modal-sub">三个游戏，都是用你的手做石头 / 剪刀 / 布</p>
+      <div class="guide-block">
+        <h3>✋ 游戏一 · 照做</h3>
+        <p>屏幕中间显示一个手势，你做出<b>一模一样</b>的手势。</p>
+        <p>单手关：屏幕一个目标，做对即过关，时间先慢后快。<br>
+        双手关：左右各一个目标，<b>左手做左边的、右手做右边的</b>，两只手同时做对才算。</p>
+        <p>每关 6 个手势，做对 5 个过关（给"没识别到"留了容错），累计 4 关。</p>
+      </div>
+      <div class="guide-block">
+        <h3>↩️ 游戏二 · 反着来</h3>
+        <p>屏幕显示一个手势，你的回应必须<b>与它不同</b>，而且<b>不能重复上一轮自己用过的</b>。</p>
+        <p>做对得分并涨连击；和屏幕相同 → 炸弹，游戏结束；重复自己上一轮 → 提示不加分，倒计时继续；超时没回应 → 游戏结束。</p>
+        <p>档位 L1→L3，倒计时越来越短。</p>
+      </div>
+      <div class="guide-block">
+        <h3>🎯 游戏三 · 危险线挑战</h3>
+        <p>手势目标和炸弹从上方掉落，你<b>做出和目标相同的手势</b>把它消除（一次只能消最下面、最早生成的那个）。</p>
+        <p>同时用<b>鼻尖（脸）左右移动</b>控制底部飞机躲开炸弹。</p>
+        <p>目标越过底部危险线 → 失败；炸弹撞到飞机 → 失败。共 5 波，每波 5 个目标，全部消除即通关。</p>
+      </div>
+      <p class="modal-foot">摄像头需要 HTTPS 或 localhost（建议用 Live Server 打开）· 首次打开需联网加载识别模型 · 画面只在本地处理，不上传</p>
+    </div>
+  </div>
+
+  <!-- 设置弹窗 -->
+  <div id="settings" class="modal" style="display:none">
+    <div class="modal-box">
+      <button id="settingsClose" class="close-btn">×</button>
+      <h2>设置</h2>
+      <div class="setting-row">
+        <label for="volSlider">总音量</label>
+        <input id="volSlider" type="range" min="0" max="100" value="45">
+        <span id="volValue">45%</span>
+      </div>
+      <div class="setting-row">
+        <label>摄像头状态</label>
+        <span id="camStatus" class="status-val">未开启</span>
+      </div>
+      <div class="setting-row">
+        <label>识别状态</label>
+        <span id="trackStatus" class="status-val">—</span>
+      </div>
+      <p class="modal-foot">游戏中按 <kbd>M</kbd> 返回选择界面 · 按 <kbd>R</kbd> 重新挑战<br>音量只在本次游玩内生效，不影响你的纪录</p>
+    </div>
+  </div>
+
   <div id="status">欢迎！点击"开始游戏"进入</div>
 </body>
 </html>
